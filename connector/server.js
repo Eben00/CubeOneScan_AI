@@ -45,6 +45,7 @@ const VMG_DEALER_SCOPES_RAW = (process.env.VMG_DEALER_SCOPES || "509").trim();
 const VMG_TIMEOUT_MS = Number(process.env.VMG_TIMEOUT_MS || 12000);
 const VMG_CACHE_TTL_MS = Number(process.env.VMG_CACHE_TTL_MS || 300000);
 const DEALER_ID_ALIASES_RAW = (process.env.DEALER_ID_ALIASES || "").trim();
+const USER_EMAIL_DEALER_MAP_RAW = (process.env.USER_EMAIL_DEALER_MAP || "").trim();
 const AUTH_JWT_SECRET = (process.env.AUTH_JWT_SECRET || "").trim();
 const COMMAND_MAX_RETRIES = Number(process.env.COMMAND_MAX_RETRIES || 3);
 const COMMAND_RETRY_DELAY_MS = Number(process.env.COMMAND_RETRY_DELAY_MS || 1200);
@@ -172,12 +173,22 @@ function extractTenantContext(req, _res, next) {
     const headerDealerId = String(req.headers["x-dealer-id"] || "").trim();
     const headerBranchId = String(req.headers["x-branch-id"] || "").trim();
     const headerRole = String(req.headers["x-user-role"] || "").trim();
+    const resolvedUserEmail = String(claims.email || claims.userEmail || req.headers["x-user-email"] || "").trim().toLowerCase();
+    const mappedDealerId = resolvedUserEmail ? USER_EMAIL_DEALER_MAP.get(resolvedUserEmail) : null;
+    const effectiveDealerId = headerDealerId || mappedDealerId || claims.dealerId || null;
+    if (!headerDealerId && mappedDealerId && String(claims.dealerId || "").trim() !== String(mappedDealerId)) {
+      log("info", "tenant_dealer_overridden_by_email_map", {
+        userEmail: resolvedUserEmail,
+        fromDealerId: String(claims.dealerId || "").trim() || null,
+        toDealerId: mappedDealerId,
+      });
+    }
     req.tenantContext = {
       userId: claims.userId || claims.sub || req.headers["x-user-id"] || null,
-      userEmail: claims.email || claims.userEmail || req.headers["x-user-email"] || null,
+      userEmail: resolvedUserEmail || null,
       userName: claims.name || claims.displayName || claims.fullName || req.headers["x-user-name"] || null,
       // Prefer explicit headers from app settings over token claims for tenant scoping.
-      dealerId: headerDealerId || claims.dealerId || null,
+      dealerId: effectiveDealerId,
       branchId: headerBranchId || claims.branchId || null,
       role: headerRole || claims.role || null,
     };
@@ -1292,6 +1303,7 @@ function parseDealerAliases(raw) {
 }
 
 const DEALER_ID_ALIASES = parseDealerAliases(DEALER_ID_ALIASES_RAW);
+const USER_EMAIL_DEALER_MAP = parseDealerAliases(USER_EMAIL_DEALER_MAP_RAW);
 
 function dealerScopeCandidates(dealerScope) {
   const out = new Set();
