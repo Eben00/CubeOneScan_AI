@@ -46,6 +46,7 @@ const VMG_TIMEOUT_MS = Number(process.env.VMG_TIMEOUT_MS || 12000);
 const VMG_CACHE_TTL_MS = Number(process.env.VMG_CACHE_TTL_MS || 300000);
 const DEALER_ID_ALIASES_RAW = (process.env.DEALER_ID_ALIASES || "").trim();
 const USER_EMAIL_DEALER_MAP_RAW = (process.env.USER_EMAIL_DEALER_MAP || "").trim();
+const ENFORCE_TENANT_RINGFENCE = String(process.env.ENFORCE_TENANT_RINGFENCE || "1").trim() !== "0";
 const AUTH_JWT_SECRET = (process.env.AUTH_JWT_SECRET || "").trim();
 const COMMAND_MAX_RETRIES = Number(process.env.COMMAND_MAX_RETRIES || 3);
 const COMMAND_RETRY_DELAY_MS = Number(process.env.COMMAND_RETRY_DELAY_MS || 1200);
@@ -160,7 +161,7 @@ function requireAuth(req, res, next) {
   next();
 }
 
-function extractTenantContext(req, _res, next) {
+function extractTenantContext(req, res, next) {
     const userToken = String(req.headers["x-user-token"] || "").trim();
     let claims = {};
     if (userToken && AUTH_JWT_SECRET) {
@@ -175,13 +176,31 @@ function extractTenantContext(req, _res, next) {
     const headerRole = String(req.headers["x-user-role"] || "").trim();
     const resolvedUserEmail = String(claims.email || claims.userEmail || req.headers["x-user-email"] || "").trim().toLowerCase();
     const mappedDealerId = resolvedUserEmail ? USER_EMAIL_DEALER_MAP.get(resolvedUserEmail) : null;
-    const effectiveDealerId = headerDealerId || mappedDealerId || claims.dealerId || null;
+    const tokenDealerId = String(claims.dealerId || "").trim();
+    if (ENFORCE_TENANT_RINGFENCE && USER_EMAIL_DEALER_MAP.size > 0) {
+      if (!resolvedUserEmail) {
+        return sendApiError(req, res, 403, "tenant_identity_missing", "Missing user email in auth context.");
+      }
+      if (!mappedDealerId) {
+        return sendApiError(req, res, 403, "tenant_not_mapped", "User is not mapped to a dealership in USER_EMAIL_DEALER_MAP.");
+      }
+      if (headerDealerId && headerDealerId !== mappedDealerId) {
+        return sendApiError(req, res, 403, "tenant_mismatch", "Header dealer scope does not match mapped user dealership.");
+      }
+      if (tokenDealerId && tokenDealerId !== mappedDealerId) {
+        return sendApiError(req, res, 403, "tenant_mismatch", "Token dealer scope does not match mapped user dealership.");
+      }
+    }
+    const effectiveDealerId = mappedDealerId || headerDealerId || tokenDealerId || null;
     if (!headerDealerId && mappedDealerId && String(claims.dealerId || "").trim() !== String(mappedDealerId)) {
       log("info", "tenant_dealer_overridden_by_email_map", {
         userEmail: resolvedUserEmail,
         fromDealerId: String(claims.dealerId || "").trim() || null,
         toDealerId: mappedDealerId,
       });
+    }
+    if (ENFORCE_TENANT_RINGFENCE && !effectiveDealerId) {
+      return sendApiError(req, res, 403, "tenant_scope_missing", "Unable to resolve dealership scope for this user.");
     }
     req.tenantContext = {
       userId: claims.userId || claims.sub || req.headers["x-user-id"] || null,
@@ -3333,6 +3352,8 @@ app.listen(PORT, "0.0.0.0", () => {
     commandsLoaded: commands.size,
     deadLetters: deadLetters.length,
     storeFile: STORE_FILE,
+    tenantRingfence: ENFORCE_TENANT_RINGFENCE,
+    mappedUsers: USER_EMAIL_DEALER_MAP.size,
   });
 });
 
