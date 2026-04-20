@@ -788,7 +788,7 @@ const EVOLVESA_LEAD_RECEIVING_ENTITY_MAP = parseKeyValueMap(EVOLVESA_LEAD_RECEIV
 const EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER = parseKeyValueMap(EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER_RAW);
 
 function resolveLeadReceivingEntity(tenantDealerId) {
-  const dealerId = String(tenantDealerId || "").trim();
+  const dealerId = resolveEvolveDealerId(tenantDealerId);
   const mapped = dealerId ? EVOLVESA_LEAD_RECEIVING_ENTITY_MAP.get(dealerId) : null;
   if (mapped) {
     const sep = mapped.indexOf("|");
@@ -806,8 +806,15 @@ function resolveLeadReceivingEntity(tenantDealerId) {
   };
 }
 
+function resolveEvolveDealerId(tenantDealerId) {
+  const raw = normalizeDealerToken(tenantDealerId);
+  if (!raw) return "";
+  const aliased = DEALER_ID_ALIASES.get(raw);
+  return String(aliased || raw).trim();
+}
+
 function resolveLeadTriggerUrl(tenantDealerId) {
-  const dealerId = String(tenantDealerId || "").trim();
+  const dealerId = resolveEvolveDealerId(tenantDealerId);
   if (dealerId && EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER.has(dealerId)) {
     return EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER.get(dealerId);
   }
@@ -954,6 +961,8 @@ async function evolvesaTriggerCreateLead(payload) {
     log("info", "evolvesa_lead_trigger_ok", {
       httpStatus: response.status,
       leadId: resolvedLeadId,
+      dealerId: resolveEvolveDealerId(tenant?.dealerId),
+      triggerUrl: redactEvolveTriggerUrl(resolvedTriggerUrl),
       responseType: json == null ? "empty" : Array.isArray(json) ? "array" : typeof json,
       rawResponsePreview: responsePreview,
     });
