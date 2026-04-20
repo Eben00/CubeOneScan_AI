@@ -948,6 +948,20 @@ async function evolvesaTriggerCreateLead(payload) {
       throw new Error(`EvolveSA lead trigger HTTP ${response.status}${preview ? `: ${preview}` : ""}`);
     }
 
+    // Some trigger flows return HTTP 200 with an application-level error payload.
+    // Treat these as failures so command status reflects the true outcome.
+    const payloadStatus = Number(json?.status);
+    const payloadCode = String(json?.code || "").trim();
+    const payloadName = String(json?.name || "").trim();
+    const hasPayloadError =
+      (Number.isFinite(payloadStatus) && payloadStatus >= 400) ||
+      payloadCode.toUpperCase() === "INVALID_FOREIGN_KEY" ||
+      payloadName.toLowerCase().includes("error");
+    if (hasPayloadError) {
+      const preview = text && text.length > 700 ? `${text.slice(0, 700)}…` : text;
+      throw new Error(`EvolveSA lead trigger payload error${preview ? `: ${preview}` : ""}`);
+    }
+
     // Trigger responses vary; try several shapes.
     let leadId = null;
     if (typeof json === "number") leadId = String(json);
