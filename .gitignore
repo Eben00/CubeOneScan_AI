@@ -60,3 +60,17 @@ connector/data/
 cubeone-auth/audit-log.json
 cubeone-auth/session-state.json
 cubeone-auth/users.json
+
+# Local workspace-only folders/files
+.idea/
+ai_memory/
+cubeonescan_project/
+generated_project/
+upload/
+
+# Local helper scripts / copies
+* - Copy.*
+ai_dev_loop.py
+android_error_fix.py
+diagnose_scanner.ps1
+multi_agent.py

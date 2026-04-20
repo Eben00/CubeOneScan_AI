@@ -947,10 +947,15 @@ async function evolvesaTriggerCreateLead(payload) {
     }
 
     const resolvedLeadId = leadId || `lead_${uuidv4()}`;
+    const responsePreview = text
+      ? (text.length > 2000 ? `${text.slice(0, 2000)}…` : text)
+      : "";
+
     log("info", "evolvesa_lead_trigger_ok", {
       httpStatus: response.status,
       leadId: resolvedLeadId,
       responseType: json == null ? "empty" : Array.isArray(json) ? "array" : typeof json,
+      rawResponsePreview: responsePreview,
     });
 
     return {

@@ -18,9 +18,10 @@ app.use(
 
 const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET || "CHANGE_ME_JWT_SECRET";
-const USERS_FILE = path.join(__dirname, "users.json");
-const AUDIT_FILE = path.join(__dirname, "audit-log.json");
-const SESSION_FILE = path.join(__dirname, "session-state.json");
+const AUTH_DATA_DIR = String(process.env.AUTH_DATA_DIR || __dirname).trim() || __dirname;
+const USERS_FILE = path.join(AUTH_DATA_DIR, "users.json");
+const AUDIT_FILE = path.join(AUTH_DATA_DIR, "audit-log.json");
+const SESSION_FILE = path.join(AUTH_DATA_DIR, "session-state.json");
 const BUSINESS_ROLES = ["dealer_principal", "sales_manager", "sales_person"];
 const LOGIN_MAX_FAILED_ATTEMPTS = Number(process.env.LOGIN_MAX_FAILED_ATTEMPTS || 5);
 const LOGIN_WINDOW_MS = Number(process.env.LOGIN_WINDOW_MS || 15 * 60 * 1000);
@@ -30,6 +31,15 @@ if (!JWT_SECRET || JWT_SECRET === "CHANGE_ME_JWT_SECRET") {
   console.warn(
     "[cubeone-auth] WARNING: Using default JWT_SECRET. Set JWT_SECRET in .env for production."
   );
+}
+
+try {
+  fs.mkdirSync(AUTH_DATA_DIR, { recursive: true });
+} catch (err) {
+  console.error("[cubeone-auth] Failed to initialize AUTH_DATA_DIR", {
+    AUTH_DATA_DIR,
+    error: err?.message || String(err),
+  });
 }
 
 function readUsers() {
@@ -696,5 +706,6 @@ app.get("/api/v1/admin/audit-events", requireDealerUser, (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`cubeone-auth listening on http://0.0.0.0:${PORT}`);
+  console.log(`[cubeone-auth] data dir: ${AUTH_DATA_DIR}`);
 });
 
