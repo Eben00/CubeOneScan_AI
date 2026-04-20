@@ -278,8 +278,18 @@ function parseTokenSet(raw) {
 const VMG_DEALER_SCOPES = parseTokenSet(VMG_DEALER_SCOPES_RAW);
 
 function useVmgFeedForDealer(dealerScope) {
-  const dealer = String(dealerScope || "").trim().toLowerCase();
-  return Boolean(VMG_STOCK_FEED_URL) && dealer && VMG_DEALER_SCOPES.has(dealer);
+  if (!VMG_STOCK_FEED_URL) return false;
+  const raw = String(dealerScope || "").trim().toLowerCase();
+  if (!raw) return false;
+  const digits = raw.replace(/\D+/g, "");
+  const aliased = DEALER_ID_ALIASES?.get(raw) || "";
+  const aliasedDigits = String(aliased).replace(/\D+/g, "");
+  return Boolean(
+    VMG_DEALER_SCOPES.has(raw) ||
+    (digits && VMG_DEALER_SCOPES.has(digits)) ||
+    (aliased && VMG_DEALER_SCOPES.has(String(aliased).toLowerCase())) ||
+    (aliasedDigits && VMG_DEALER_SCOPES.has(aliasedDigits))
+  );
 }
 
 function ensureDataDir() {
@@ -2262,19 +2272,35 @@ async function processCommand(commandType, payload) {
         return result;
       }
 
+      const useVmgFeed = useVmgFeedForDealer(dealerScope);
       let fetched;
       try {
-        fetched = await fetchAutoTraderListingsCached(false);
+        fetched = useVmgFeed
+          ? await fetchVmgListingsCached(false)
+          : await fetchAutoTraderListingsCached(false);
       } catch (e) {
         fetched = {
-          rows: Array.isArray(autoTraderListingsCache.rows) ? autoTraderListingsCache.rows : [],
+          rows: useVmgFeed
+            ? (Array.isArray(vmgListingsCache.rows) ? vmgListingsCache.rows : [])
+            : (Array.isArray(autoTraderListingsCache.rows) ? autoTraderListingsCache.rows : []),
           source: "cache_only_on_error",
-          cachedAt: autoTraderListingsCache.fetchedAtMs ? new Date(autoTraderListingsCache.fetchedAtMs).toISOString() : null,
+          cachedAt: useVmgFeed
+            ? (vmgListingsCache.fetchedAtMs ? new Date(vmgListingsCache.fetchedAtMs).toISOString() : null)
+            : (autoTraderListingsCache.fetchedAtMs ? new Date(autoTraderListingsCache.fetchedAtMs).toISOString() : null),
         };
         result.stockLookupWarning = e?.message || String(e);
       }
 
-      const dealerRows = fetched.rows.filter((row) => stockMatchesDealerScope(row, dealerScope));
+      const dealerRows = useVmgFeed
+        ? fetched.rows
+        : fetched.rows.filter((row) => stockMatchesDealerScope(row, dealerScope));
+      log("info", "stock_take_feed_selected", {
+        provider: useVmgFeed ? "vmg" : "autotrader",
+        dealerScope,
+        rowsLoaded: Array.isArray(fetched.rows) ? fetched.rows.length : 0,
+        rowsAfterScope: dealerRows.length,
+        source: fetched.source || null,
+      });
       const scored = dealerRows
         .map((row) => {
           const match = scoreStockTakeMatch(row, scanVehicle);
@@ -2316,7 +2342,7 @@ async function processCommand(commandType, payload) {
       }));
 
       if (!top) {
-        result.warning = "No AutoTrader stock match found for the scanned barcode.";
+        result.warning = `No ${useVmgFeed ? "VMG" : "AutoTrader"} stock match found for the scanned barcode.`;
         return result;
       }
 
