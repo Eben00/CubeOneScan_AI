@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">EvolveSAScan</string>
+    <string name="home_footer">Powered by CubeOne platform for EvolveSA.</string>
+    <string name="settings_intro">Point the app at your CubeOne connector for EvolveSA (local IP or tunnel URL). Save, then use Test connection.</string>
+    <string name="settings_support_subject">EvolveSAScan support request</string>
+    <string name="settings_deletion_subject">EvolveSAScan account deletion request</string>
+</resources>

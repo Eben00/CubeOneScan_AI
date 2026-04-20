@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="padding_screen">20dp</dimen>
+    <dimen name="padding_card">16dp</dimen>
+    <dimen name="corner_card">16dp</dimen>
+    <dimen name="corner_button">20dp</dimen>
+    <dimen name="space_section">20dp</dimen>
+</resources>

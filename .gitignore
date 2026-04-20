@@ -1,0 +1,62 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Release signing secrets
+keystore.properties
+*.jks
+*.keystore
+
+# Node / JS
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Android / Kotlin build outputs
+**/build/
+**/.cxx/
+**/.externalNativeBuild/
+**/captures/
+**/.kotlin/
+
+# IDE / OS
+.vscode/
+Thumbs.db
+
+# Archives / generated bundles
+*.zip
+*.7z
+*.tar
+*.gz
+
+# Runtime logs and dumps
+*.log
+full_log.txt
+scanner_report.txt
+ai_scanner_report*.txt
+cubeone_log*.txt
+
+# Environment secrets
+.env
+**/.env
+**/.env.*
+!**/.env.example
+
+# Local runtime state
+connector/data/
+cubeone-auth/audit-log.json
+cubeone-auth/session-state.json
+cubeone-auth/users.json

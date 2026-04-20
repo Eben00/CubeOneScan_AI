@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Audit Events"
+        android:textStyle="bold"
+        android:textSize="22sp"
+        android:paddingBottom="4dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Review dealership activity by action and user."
+        android:textSize="14sp"
+        android:paddingBottom="12dp" />
+
+    <EditText
+        android:id="@+id/etAuditActionFilter"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Filter by action, e.g. login or reset" />
+
+    <EditText
+        android:id="@+id/etAuditUserFilter"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:hint="Filter by actor or target email" />
+
+    <Button
+        android:id="@+id/btnRefreshAudit"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Refresh audit log" />
+
+    <ListView
+        android:id="@+id/lvAuditEvents"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="12dp"
+        android:layout_weight="1" />
+
+</LinearLayout>
+

@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/bg_app_gradient"
+    android:clipToPadding="false"
+    android:fillViewport="true"
+    android:padding="@dimen/padding_screen">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:paddingTop="32dp"
+        android:paddingBottom="40dp">
+
+        <ImageView
+            android:layout_width="88dp"
+            android:layout_height="88dp"
+            android:contentDescription="@null"
+            android:src="@drawable/brand_logo"
+            android:scaleType="fitCenter"
+            android:adjustViewBounds="true"
+            android:importantForAccessibility="no" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:letterSpacing="0.02"
+            android:text="@string/app_name"
+            android:textColor="@color/white"
+            android:textSize="28sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:lineSpacingExtra="4dp"
+            android:text="@string/home_subtitle"
+            android:textColor="@color/text_secondary"
+            android:textSize="15sp" />
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="32dp"
+            app:cardBackgroundColor="@android:color/transparent"
+            app:cardCornerRadius="@dimen/corner_card"
+            app:cardElevation="0dp"
+            app:strokeColor="@color/divider"
+            app:strokeWidth="1dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="@drawable/bg_glass_card"
+                android:padding="@dimen/padding_card">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Choose an action to begin"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnScanDriverLicense"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:minHeight="56dp"
+                    android:text="Scan Driver License"
+                    app:cornerRadius="@dimen/corner_button" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnScanVehicleLicense"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:minHeight="52dp"
+                    android:text="Scan Vehicle License"
+                    app:cornerRadius="@dimen/corner_button" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnStockTakeWorkflow"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:minHeight="52dp"
+                    android:text="Stock Take"
+                    app:cornerRadius="@dimen/corner_button" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnTradeInWorkflow"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:minHeight="52dp"
+                    android:text="Trade-In"
+                    app:cornerRadius="@dimen/corner_button" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnShareLeadWorkflow"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:minHeight="52dp"
+                    android:text="Share Lead"
+                    app:cornerRadius="@dimen/corner_button" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnShareStockWorkflow"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:minHeight="52dp"
+                    android:text="Share Stock"
+                    app:cornerRadius="@dimen/corner_button" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnSettings"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:minHeight="52dp"
+            android:text="@string/home_settings"
+            app:cornerRadius="@dimen/corner_button" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnApprovals"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:minHeight="52dp"
+            android:text="Manager approvals"
+            app:cornerRadius="@dimen/corner_button" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnAuditEvents"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:minHeight="52dp"
+            android:text="Audit events"
+            app:cornerRadius="@dimen/corner_button" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnLogoutAll"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:minHeight="52dp"
+            android:text="Log out all devices"
+            app:cornerRadius="@dimen/corner_button" />
+
+        <TextView
+            android:id="@+id/tvQueueBadge"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:text="Offline queue: 0 pending"
+            android:textColor="@color/text_secondary"
+            android:textSize="12sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnRetryQueue"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:minHeight="52dp"
+            android:text="Retry queued commands"
+            app:cornerRadius="@dimen/corner_button" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnLogout"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/logout" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:gravity="center"
+            android:text="@string/home_footer"
+            android:textColor="@color/text_secondary"
+            android:textSize="12sp" />
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

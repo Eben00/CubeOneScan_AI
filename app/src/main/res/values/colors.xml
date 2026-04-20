@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand (enterprise blue for white-label baseline) -->
+    <color name="primary">#FF0F4C8A</color>
+    <color name="primary_dark">#FF093260</color>
+    <color name="primary_light">#FF2B6FB5</color>
+    <color name="on_primary">#FFFFFFFF</color>
+
+    <color name="secondary">#FF1E88E5</color>
+    <color name="on_secondary">#FFFFFFFF</color>
+
+    <!-- Surfaces (EvolveSA-like light dashboard styling) -->
+    <color name="background">#FFECEFF3</color>
+    <color name="surface">#FFFFFFFF</color>
+    <color name="surface_variant">#FFF6F8FB</color>
+    <color name="text_primary">#FF1F2937</color>
+    <color name="text_secondary">#FF4B5563</color>
+    <color name="divider">#FFD5DCE5</color>
+
+    <!-- Legacy names mapped for compatibility -->
+    <color name="purple_200">#FFBB86FC</color>
+    <color name="purple_500">@color/primary</color>
+    <color name="purple_700">@color/primary_dark</color>
+    <color name="teal_200">#FF80CBC4</color>
+    <color name="teal_700">#FF00695C</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <color name="screen_bg">@color/background</color>
+    <color name="card_bg">#FFFFFFFF</color>
+    <color name="card_valuation_bg">#FF102A43</color>
+    <color name="trade_amber">#FFFFB74D</color>
+    <color name="retail_green">#FF66BB6A</color>
+    <color name="market_blue">#FF64B5F6</color>
+
+    <color name="scanner_overlay">#CC000000</color>
+    <color name="photo_placeholder">#FFE2E8F0</color>
+    <color name="accent_glow">#FF2B6FB5</color>
+    <color name="scanner_bottom_scrim">#B31B2E4B</color>
+</resources>

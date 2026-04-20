@@ -1,0 +1,82 @@
+services:
+  - type: web
+    name: cubeone-auth
+    runtime: docker
+    dockerfilePath: ./cubeone-auth/Dockerfile
+    dockerContext: ./cubeone-auth
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: 4000
+      - key: JWT_SECRET
+        sync: false
+
+  - type: web
+    name: cubeone-connector
+    runtime: docker
+    dockerfilePath: ./connector/Dockerfile
+    dockerContext: ./connector
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: API_KEY
+        sync: false
+      - key: AUTH_JWT_SECRET
+        sync: false
+      - key: DEALER_ID_ALIASES
+        sync: false
+      - key: EVOLVESA_LEAD_TRIGGER_URL
+        sync: false
+      - key: EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER
+        sync: false
+      - key: EVOLVESA_LEAD_RECEIVING_ENTITY_ID
+        sync: false
+      - key: EVOLVESA_LEAD_RECEIVING_ENTITY_NAME
+        sync: false
+      - key: EVOLVESA_LEAD_RECEIVING_ENTITY_MAP
+        sync: false
+      - key: EVOLVESA_STOCK_SOURCE
+        value: CubeOneScan
+      - key: EVOLVESA_STOCK_SOURCE_ID
+        value: "236"
+      - key: EVOLVESA_LEAD_SOURCE
+        value: CubeOneScan
+      - key: EVOLVESA_LEAD_SOURCE_ID
+        value: "236"
+      - key: EVOLVESA_DEFAULT_LEAD_ANCILLARY_AREA
+        value: Gauteng
+      - key: EVOLVESA_DEFAULT_LEAD_USER_AREA
+        value: JHB
+      - key: EVOLVESA_TIMEOUT_MS
+        value: "15000"
+      - key: TRUTRADE_API_KEY
+        sync: false
+      - key: TRUTRADE_API_SECRET
+        sync: false
+      - key: TRUTRADE_BASE_URL
+        value: https://api.yourvehiclevalue.co.za/api
+      - key: TRUTRADE_DEBUG_LOG
+        value: "1"
+      - key: AUTOTRADER_LISTINGS_URL
+        value: https://services.autotrader.co.za/api/syndication/v1.0/listings
+      - key: AUTOTRADER_BASIC_AUTH
+        sync: false
+      - key: AUTOTRADER_TIMEOUT_MS
+        value: "12000"
+      - key: AUTOTRADER_LISTINGS_CACHE_TTL_MS
+        value: "3600000"
+      - key: AUTOTRADER_RATE_LIMIT_COOLDOWN_MS
+        value: "3600000"
+      - key: VMG_STOCK_FEED_URL
+        sync: false
+      - key: VMG_DEALER_SCOPES
+        value: "509"
+      - key: VMG_TIMEOUT_MS
+        value: "12000"
+      - key: VMG_CACHE_TTL_MS
+        value: "300000"

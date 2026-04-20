@@ -1,0 +1,22 @@
+{
+  "name": "cubeonescan-connector",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Connector backend for CubeOneScan mobile app (scan -> CRM/DMS commands).",
+  "main": "server.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "smoke": "node scripts/smoke-test.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "dotenv": "^16.4.5",
+    "uuid": "^9.0.1"
+  }
+}
+
