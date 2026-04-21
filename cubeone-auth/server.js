@@ -47,6 +47,7 @@ function normalizeConfigMap(raw) {
 function loadTenantConfig() {
   const rawJson = String(process.env.TENANT_CONFIG_JSON || "").trim();
   const configFile = String(process.env.TENANT_CONFIG_FILE || "").trim();
+  const runtimeFile = path.join(AUTH_DATA_DIR, "tenant-config.runtime.json");
   const candidates = [];
   if (rawJson) candidates.push({ source: "TENANT_CONFIG_JSON", text: rawJson });
   if (configFile) {
@@ -57,6 +58,16 @@ function loadTenantConfig() {
     } catch (_) {
       // Fall through.
     }
+  }
+  try {
+    if (fs.existsSync(runtimeFile)) {
+      candidates.push({
+        source: `TENANT_CONFIG_RUNTIME:${runtimeFile}`,
+        text: fs.readFileSync(runtimeFile, "utf8"),
+      });
+    }
+  } catch (_) {
+    // Ignore runtime file read issues.
   }
   for (const c of candidates) {
     try {
@@ -73,13 +84,17 @@ function loadTenantConfig() {
   return { source: "env_defaults", dealerAliasesRaw: "", emailDealerMapRaw: "" };
 }
 
-const TENANT_CONFIG = loadTenantConfig();
-const AUTH_DEALER_ID_ALIASES_RAW = String(
-  TENANT_CONFIG.dealerAliasesRaw || process.env.AUTH_DEALER_ID_ALIASES || ""
+let TENANT_CONFIG = loadTenantConfig();
+const AUTH_DEALER_ID_ALIASES_RAW_DEFAULT = String(process.env.AUTH_DEALER_ID_ALIASES || "").trim();
+const AUTH_EMAIL_DEALER_MAP_RAW_DEFAULT = String(process.env.AUTH_EMAIL_DEALER_MAP || "").trim();
+let AUTH_DEALER_ID_ALIASES_RAW = String(
+  TENANT_CONFIG.dealerAliasesRaw || AUTH_DEALER_ID_ALIASES_RAW_DEFAULT || ""
 ).trim();
-const AUTH_EMAIL_DEALER_MAP_RAW = String(
-  TENANT_CONFIG.emailDealerMapRaw || process.env.AUTH_EMAIL_DEALER_MAP || ""
+let AUTH_EMAIL_DEALER_MAP_RAW = String(
+  TENANT_CONFIG.emailDealerMapRaw || AUTH_EMAIL_DEALER_MAP_RAW_DEFAULT || ""
 ).trim();
+const TENANT_ADMIN_TOKEN = String(process.env.TENANT_ADMIN_TOKEN || "").trim();
+const TENANT_CONFIG_RUNTIME_FILE = path.join(AUTH_DATA_DIR, "tenant-config.runtime.json");
 const BUSINESS_ROLES = ["dealer_principal", "sales_manager", "sales_person"];
 const LOGIN_MAX_FAILED_ATTEMPTS = Number(process.env.LOGIN_MAX_FAILED_ATTEMPTS || 5);
 const LOGIN_WINDOW_MS = Number(process.env.LOGIN_WINDOW_MS || 15 * 60 * 1000);
@@ -292,8 +307,47 @@ function parseMap(raw) {
   return map;
 }
 
-const AUTH_DEALER_ID_ALIASES = parseMap(AUTH_DEALER_ID_ALIASES_RAW);
-const AUTH_EMAIL_DEALER_MAP = parseMap(AUTH_EMAIL_DEALER_MAP_RAW);
+let AUTH_DEALER_ID_ALIASES = parseMap(AUTH_DEALER_ID_ALIASES_RAW);
+let AUTH_EMAIL_DEALER_MAP = parseMap(AUTH_EMAIL_DEALER_MAP_RAW);
+
+function tenantConfigSnapshot() {
+  return {
+    source: TENANT_CONFIG.source,
+    dealerAliases: Object.fromEntries(AUTH_DEALER_ID_ALIASES),
+    emailDealerMap: Object.fromEntries(AUTH_EMAIL_DEALER_MAP),
+  };
+}
+
+function validateTenantConfigPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return "tenant config payload must be a JSON object";
+  }
+  const maybeMapKeys = ["dealerAliases", "emailDealerMap"];
+  for (const key of maybeMapKeys) {
+    const value = payload[key];
+    if (value == null) continue;
+    if (typeof value !== "object" || Array.isArray(value)) {
+      return `${key} must be an object map`;
+    }
+  }
+  return null;
+}
+
+function applyTenantConfigPayload(payload, sourceLabel = "admin_api") {
+  TENANT_CONFIG = {
+    source: sourceLabel,
+    dealerAliasesRaw: normalizeConfigMap(payload?.dealerAliases),
+    emailDealerMapRaw: normalizeConfigMap(payload?.emailDealerMap),
+  };
+  AUTH_DEALER_ID_ALIASES_RAW = String(
+    TENANT_CONFIG.dealerAliasesRaw || AUTH_DEALER_ID_ALIASES_RAW_DEFAULT || ""
+  ).trim();
+  AUTH_EMAIL_DEALER_MAP_RAW = String(
+    TENANT_CONFIG.emailDealerMapRaw || AUTH_EMAIL_DEALER_MAP_RAW_DEFAULT || ""
+  ).trim();
+  AUTH_DEALER_ID_ALIASES = parseMap(AUTH_DEALER_ID_ALIASES_RAW);
+  AUTH_EMAIL_DEALER_MAP = parseMap(AUTH_EMAIL_DEALER_MAP_RAW);
+}
 
 function canonicalDealerId(input) {
   const raw = normalizeDealerToken(input);
@@ -370,6 +424,29 @@ function requireAuth(req, res, next) {
   return verifyAccessToken(req, res, next);
 }
 
+function requireTenantAdmin(req, res, next) {
+  const header = String(req.headers.authorization || "");
+  const m = header.match(/^Bearer\s+(.+)$/i);
+  if (!m) return res.status(401).json({ error: "missing_bearer_token" });
+  try {
+    const claims = jwt.verify(m[1], JWT_SECRET);
+    const role = normalizeRole(claims?.role);
+    if (role !== "dealer_principal") {
+      return res.status(403).json({ error: "forbidden", hint: "dealer_principal_required" });
+    }
+    if (TENANT_ADMIN_TOKEN) {
+      const provided = String(req.headers["x-tenant-admin-token"] || "").trim();
+      if (!provided || provided !== TENANT_ADMIN_TOKEN) {
+        return res.status(403).json({ error: "forbidden", hint: "missing_or_invalid_tenant_admin_token" });
+      }
+    }
+    req.authClaims = claims;
+    next();
+  } catch (_) {
+    return res.status(401).json({ error: "invalid_token" });
+  }
+}
+
 function requireRoleSet(allowedRoles) {
   return (req, res, next) =>
     verifyAccessToken(req, res, () => {
@@ -395,6 +472,37 @@ function resolveClientIp(req) {
 
 app.get("/healthz", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.get("/api/v1/admin/tenant-config", requireTenantAdmin, (_req, res) => {
+  return res.json({
+    ok: true,
+    ...tenantConfigSnapshot(),
+  });
+});
+
+app.put("/api/v1/admin/tenant-config", requireTenantAdmin, (req, res) => {
+  const payload = req.body || {};
+  const validationError = validateTenantConfigPayload(payload);
+  if (validationError) {
+    return res.status(400).json({ error: "invalid_tenant_config", detail: validationError });
+  }
+  applyTenantConfigPayload(payload, "admin_api_runtime");
+  try {
+    fs.mkdirSync(AUTH_DATA_DIR, { recursive: true });
+    fs.writeFileSync(TENANT_CONFIG_RUNTIME_FILE, JSON.stringify(payload, null, 2), "utf8");
+  } catch (e) {
+    return res.status(500).json({
+      error: "tenant_config_persist_failed",
+      detail: e?.message || String(e),
+      appliedInMemory: true,
+    });
+  }
+  return res.json({
+    ok: true,
+    savedTo: TENANT_CONFIG_RUNTIME_FILE,
+    ...tenantConfigSnapshot(),
+  });
 });
 
 app.post("/api/v1/auth/register", async (req, res) => {

@@ -46,6 +46,7 @@ function normalizeConfigList(raw) {
 function loadTenantConfig() {
   const rawJson = String(process.env.TENANT_CONFIG_JSON || "").trim();
   const configFile = String(process.env.TENANT_CONFIG_FILE || "").trim();
+  const runtimeFile = path.join(__dirname, "data", "tenant-config.runtime.json");
   const candidates = [];
   if (rawJson) candidates.push({ source: "TENANT_CONFIG_JSON", text: rawJson });
   if (configFile) {
@@ -56,6 +57,16 @@ function loadTenantConfig() {
     } catch (_) {
       // Fall through to env defaults.
     }
+  }
+  try {
+    if (fs.existsSync(runtimeFile)) {
+      candidates.push({
+        source: `TENANT_CONFIG_RUNTIME:${runtimeFile}`,
+        text: fs.readFileSync(runtimeFile, "utf8"),
+      });
+    }
+  } catch (_) {
+    // Ignore runtime file read issues and continue to env defaults.
   }
   for (const c of candidates) {
     try {
@@ -82,7 +93,7 @@ function loadTenantConfig() {
   };
 }
 
-const TENANT_CONFIG = loadTenantConfig();
+let TENANT_CONFIG = loadTenantConfig();
 
 const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.API_KEY || "change-me";
@@ -134,6 +145,8 @@ const AUTH_JWT_SECRET = (process.env.AUTH_JWT_SECRET || "").trim();
 const COMMAND_MAX_RETRIES = Number(process.env.COMMAND_MAX_RETRIES || 3);
 const COMMAND_RETRY_DELAY_MS = Number(process.env.COMMAND_RETRY_DELAY_MS || 1200);
 const CONNECTOR_DATA_DIR = process.env.CONNECTOR_DATA_DIR || path.join(__dirname, "data");
+const TENANT_ADMIN_TOKEN = String(process.env.TENANT_ADMIN_TOKEN || "").trim();
+const TENANT_CONFIG_RUNTIME_FILE = path.join(CONNECTOR_DATA_DIR, "tenant-config.runtime.json");
 const STORE_FILE = path.join(CONNECTOR_DATA_DIR, "commands-store.json");
 const AUTOTRADER_CACHE_FILE = path.join(CONNECTOR_DATA_DIR, "autotrader-stock-cache.json");
 const VMG_CACHE_FILE = path.join(CONNECTOR_DATA_DIR, "vmg-stock-cache.json");
@@ -398,7 +411,7 @@ function parseTokenSet(raw) {
   return out;
 }
 
-const VMG_DEALER_SCOPES = parseTokenSet(VMG_DEALER_SCOPES_RAW);
+let VMG_DEALER_SCOPES = parseTokenSet(VMG_DEALER_SCOPES_RAW);
 
 function useVmgFeedForDealer(dealerScope) {
   if (!VMG_STOCK_FEED_URL) return false;
@@ -930,8 +943,8 @@ function parseKeyValueMap(raw) {
   return map;
 }
 
-const EVOLVESA_LEAD_RECEIVING_ENTITY_MAP = parseKeyValueMap(EVOLVESA_LEAD_RECEIVING_ENTITY_MAP_RAW);
-const EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER = parseKeyValueMap(EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER_RAW);
+let EVOLVESA_LEAD_RECEIVING_ENTITY_MAP = parseKeyValueMap(EVOLVESA_LEAD_RECEIVING_ENTITY_MAP_RAW);
+let EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER = parseKeyValueMap(EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER_RAW);
 
 function resolveLeadReceivingEntity(tenantDealerId) {
   const dealerId = resolveEvolveDealerId(tenantDealerId);
@@ -1434,8 +1447,77 @@ function parseDealerAliases(raw) {
   return map;
 }
 
-const DEALER_ID_ALIASES = parseDealerAliases(DEALER_ID_ALIASES_RAW);
-const USER_EMAIL_DEALER_MAP = parseDealerAliases(USER_EMAIL_DEALER_MAP_RAW);
+let DEALER_ID_ALIASES = parseDealerAliases(DEALER_ID_ALIASES_RAW);
+let USER_EMAIL_DEALER_MAP = parseDealerAliases(USER_EMAIL_DEALER_MAP_RAW);
+
+function tenantConfigSnapshot() {
+  return {
+    source: TENANT_CONFIG.source,
+    dealerAliases: Object.fromEntries(DEALER_ID_ALIASES),
+    emailDealerMap: Object.fromEntries(USER_EMAIL_DEALER_MAP),
+    vmgDealerScopes: Array.from(VMG_DEALER_SCOPES),
+    evolvesaLeadReceivingEntityMap: Object.fromEntries(EVOLVESA_LEAD_RECEIVING_ENTITY_MAP),
+    evolvesaLeadTriggerUrlByDealer: Object.fromEntries(EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER),
+  };
+}
+
+function validateTenantConfigPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return "tenant config payload must be a JSON object";
+  }
+  const maybeMapKeys = [
+    "dealerAliases",
+    "emailDealerMap",
+    "evolvesaLeadReceivingEntityMap",
+    "evolvesaLeadTriggerUrlByDealer",
+  ];
+  for (const key of maybeMapKeys) {
+    const value = payload[key];
+    if (value == null) continue;
+    if (typeof value !== "object" || Array.isArray(value)) {
+      return `${key} must be an object map`;
+    }
+  }
+  if (payload.vmgDealerScopes != null && !Array.isArray(payload.vmgDealerScopes) && typeof payload.vmgDealerScopes !== "string") {
+    return "vmgDealerScopes must be an array or comma-separated string";
+  }
+  return null;
+}
+
+function applyTenantConfigPayload(payload, sourceLabel = "admin_api") {
+  const parsed = {
+    source: sourceLabel,
+    dealerAliasesRaw: normalizeConfigMap(payload.dealerAliases),
+    userEmailDealerMapRaw: normalizeConfigMap(payload.emailDealerMap),
+    vmgDealerScopesRaw: normalizeConfigList(payload.vmgDealerScopes),
+    evolvesaLeadReceivingEntityMapRaw: normalizeConfigMap(payload.evolvesaLeadReceivingEntityMap),
+    evolvesaLeadTriggerUrlByDealerRaw: normalizeConfigMap(payload.evolvesaLeadTriggerUrlByDealer),
+  };
+  TENANT_CONFIG = parsed;
+  DEALER_ID_ALIASES = parseDealerAliases(parsed.dealerAliasesRaw || DEALER_ID_ALIASES_RAW);
+  USER_EMAIL_DEALER_MAP = parseDealerAliases(parsed.userEmailDealerMapRaw || USER_EMAIL_DEALER_MAP_RAW);
+  VMG_DEALER_SCOPES = parseTokenSet(parsed.vmgDealerScopesRaw || VMG_DEALER_SCOPES_RAW);
+  EVOLVESA_LEAD_RECEIVING_ENTITY_MAP = parseKeyValueMap(
+    parsed.evolvesaLeadReceivingEntityMapRaw || EVOLVESA_LEAD_RECEIVING_ENTITY_MAP_RAW
+  );
+  EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER = parseKeyValueMap(
+    parsed.evolvesaLeadTriggerUrlByDealerRaw || EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER_RAW
+  );
+}
+
+function requireTenantAdmin(req, res, next) {
+  const header = req.headers["authorization"] || "";
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  const token = match ? match[1] : null;
+  if (!token || token !== API_KEY) return res.status(401).json({ error: "unauthorized" });
+  if (TENANT_ADMIN_TOKEN) {
+    const provided = String(req.headers["x-tenant-admin-token"] || "").trim();
+    if (!provided || provided !== TENANT_ADMIN_TOKEN) {
+      return res.status(403).json({ error: "forbidden", hint: "missing_or_invalid_tenant_admin_token" });
+    }
+  }
+  next();
+}
 
 function dealerScopeCandidates(dealerScope) {
   const out = new Set();
@@ -2607,6 +2689,50 @@ app.get("/readyz", (req, res) => {
       detail: e?.message || String(e),
     });
   }
+});
+
+app.get("/admin/tenant-config", (req, res) => {
+  return res.sendFile(path.join(__dirname, "admin", "tenant-admin.html"));
+});
+
+app.get("/api/v1/admin/tenant-config", requireTenantAdmin, (req, res) => {
+  return res.json({
+    ok: true,
+    ...tenantConfigSnapshot(),
+  });
+});
+
+app.put("/api/v1/admin/tenant-config", requireTenantAdmin, (req, res) => {
+  const payload = req.body || {};
+  const validationError = validateTenantConfigPayload(payload);
+  if (validationError) return res.status(400).json({ error: "invalid_tenant_config", detail: validationError });
+
+  const source = "admin_api_runtime";
+  applyTenantConfigPayload(payload, source);
+
+  const saveTarget = String(process.env.TENANT_CONFIG_FILE || "").trim() || TENANT_CONFIG_RUNTIME_FILE;
+  try {
+    ensureDataDir();
+    fs.writeFileSync(saveTarget, JSON.stringify(payload, null, 2), "utf8");
+  } catch (e) {
+    return res.status(500).json({
+      error: "tenant_config_persist_failed",
+      detail: e?.message || String(e),
+      appliedInMemory: true,
+    });
+  }
+  log("info", "tenant_config_updated", {
+    source,
+    saveTarget,
+    mappedUsers: USER_EMAIL_DEALER_MAP.size,
+    dealerAliases: DEALER_ID_ALIASES.size,
+    vmgScopes: VMG_DEALER_SCOPES.size,
+  });
+  return res.json({
+    ok: true,
+    savedTo: saveTarget,
+    ...tenantConfigSnapshot(),
+  });
 });
 
 app.use((req, res, next) => {
