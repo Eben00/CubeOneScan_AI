@@ -11,7 +11,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "smoke": "node scripts/smoke-test.js"
+    "smoke": "node scripts/smoke-test.js",
+    "tenant:generate": "node scripts/generate-tenant-config.js"
   },
   "dependencies": {
     "express": "^4.19.2",

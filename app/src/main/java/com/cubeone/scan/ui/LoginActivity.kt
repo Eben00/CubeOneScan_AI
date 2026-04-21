@@ -44,6 +44,8 @@ class LoginActivity : AppCompatActivity() {
                 Toast.makeText(this, "Enter email and password", Toast.LENGTH_LONG).show()
                 return@setOnClickListener
             }
+            // Prevent stale tenant headers/token from previous sessions.
+            AuthStore.clear(this)
             progress?.visibility = View.VISIBLE
             btnLogin.isEnabled = false
             Thread {

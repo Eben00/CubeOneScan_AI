@@ -2,6 +2,7 @@ package com.cubeone.scan.services
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Base64
 import android.util.Log
 import com.cubeone.scan.core.auth.AuthStore
 import org.json.JSONArray
@@ -93,12 +94,44 @@ object CommandApiService {
         val shouldQueue: Boolean = false
     )
 
+    private fun extractTokenClaim(accessToken: String?, key: String): String {
+        if (accessToken.isNullOrBlank()) return ""
+        return try {
+            val parts = accessToken.split(".")
+            if (parts.size < 2) return ""
+            val payloadRaw = parts[1]
+                .replace('-', '+')
+                .replace('_', '/')
+            val padded = payloadRaw + "=".repeat((4 - payloadRaw.length % 4) % 4)
+            val decoded = String(Base64.decode(padded, Base64.DEFAULT), Charsets.UTF_8)
+            JSONObject(decoded).optString(key)
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
     private fun applyUserHeaders(conn: HttpURLConnection, context: Context) {
-        AuthStore.getAccessToken(context)?.let { conn.setRequestProperty("X-User-Token", it) }
-        AuthStore.getUserId(context)?.let { conn.setRequestProperty("X-User-Id", it) }
-        AuthStore.getDisplayName(context)?.let { conn.setRequestProperty("X-User-Name", it) }
-        AuthStore.getUserEmail(context)?.let { conn.setRequestProperty("X-User-Email", it) }
-        AuthStore.getRole(context)?.let { conn.setRequestProperty("X-User-Role", it) }
+        val accessToken = AuthStore.getAccessToken(context)
+        val userId = AuthStore.getUserId(context)
+        val displayName = AuthStore.getDisplayName(context)
+        val userEmail = AuthStore.getUserEmail(context)
+        val role = AuthStore.getRole(context)
+        val dealerId = AuthStore.getDealerId(context)
+        val branchId = AuthStore.getBranchId(context)
+
+        accessToken?.let { conn.setRequestProperty("X-User-Token", it) }
+        userId?.let { conn.setRequestProperty("X-User-Id", it) }
+        displayName?.let { conn.setRequestProperty("X-User-Name", it) }
+        userEmail?.let { conn.setRequestProperty("X-User-Email", it) }
+        role?.let { conn.setRequestProperty("X-User-Role", it) }
+
+        // Diagnostic log for 401/403 troubleshooting. Never log token value.
+        val tokenEmail = extractTokenClaim(accessToken, "email")
+        val tokenDealer = extractTokenClaim(accessToken, "dealerId")
+        Log.i(
+            TAG,
+            "tenant_headers userEmail=${userEmail.orEmpty()} dealerId=${dealerId.orEmpty()} branchId=${branchId.orEmpty()} role=${role.orEmpty()} tokenPresent=${!accessToken.isNullOrBlank()} tokenEmail=$tokenEmail tokenDealerId=$tokenDealer"
+        )
     }
 
 

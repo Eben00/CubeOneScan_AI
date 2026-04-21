@@ -22,6 +22,64 @@ const AUTH_DATA_DIR = String(process.env.AUTH_DATA_DIR || __dirname).trim() || _
 const USERS_FILE = path.join(AUTH_DATA_DIR, "users.json");
 const AUDIT_FILE = path.join(AUTH_DATA_DIR, "audit-log.json");
 const SESSION_FILE = path.join(AUTH_DATA_DIR, "session-state.json");
+function normalizeConfigToken(input) {
+  let v = String(input || "").trim();
+  if ((v.startsWith("\"") && v.endsWith("\"")) || (v.startsWith("'") && v.endsWith("'"))) {
+    v = v.slice(1, -1).trim();
+  }
+  return v;
+}
+
+function normalizeConfigMap(raw) {
+  const out = [];
+  if (!raw) return "";
+  if (typeof raw === "string") return normalizeConfigToken(raw);
+  if (typeof raw === "object") {
+    for (const [k, v] of Object.entries(raw)) {
+      const key = normalizeConfigToken(k);
+      const value = normalizeConfigToken(v);
+      if (key && value) out.push(`${key}=${value}`);
+    }
+  }
+  return out.join(",");
+}
+
+function loadTenantConfig() {
+  const rawJson = String(process.env.TENANT_CONFIG_JSON || "").trim();
+  const configFile = String(process.env.TENANT_CONFIG_FILE || "").trim();
+  const candidates = [];
+  if (rawJson) candidates.push({ source: "TENANT_CONFIG_JSON", text: rawJson });
+  if (configFile) {
+    try {
+      if (fs.existsSync(configFile)) {
+        candidates.push({ source: `TENANT_CONFIG_FILE:${configFile}`, text: fs.readFileSync(configFile, "utf8") });
+      }
+    } catch (_) {
+      // Fall through.
+    }
+  }
+  for (const c of candidates) {
+    try {
+      const parsed = JSON.parse(c.text);
+      return {
+        source: c.source,
+        dealerAliasesRaw: normalizeConfigMap(parsed?.dealerAliases),
+        emailDealerMapRaw: normalizeConfigMap(parsed?.emailDealerMap),
+      };
+    } catch (_) {
+      // Try next.
+    }
+  }
+  return { source: "env_defaults", dealerAliasesRaw: "", emailDealerMapRaw: "" };
+}
+
+const TENANT_CONFIG = loadTenantConfig();
+const AUTH_DEALER_ID_ALIASES_RAW = String(
+  TENANT_CONFIG.dealerAliasesRaw || process.env.AUTH_DEALER_ID_ALIASES || ""
+).trim();
+const AUTH_EMAIL_DEALER_MAP_RAW = String(
+  TENANT_CONFIG.emailDealerMapRaw || process.env.AUTH_EMAIL_DEALER_MAP || ""
+).trim();
 const BUSINESS_ROLES = ["dealer_principal", "sales_manager", "sales_person"];
 const LOGIN_MAX_FAILED_ATTEMPTS = Number(process.env.LOGIN_MAX_FAILED_ATTEMPTS || 5);
 const LOGIN_WINDOW_MS = Number(process.env.LOGIN_WINDOW_MS || 15 * 60 * 1000);
@@ -46,7 +104,29 @@ function readUsers() {
   try {
     if (!fs.existsSync(USERS_FILE)) return [];
     const raw = fs.readFileSync(USERS_FILE, "utf8");
-    return JSON.parse(raw);
+    const users = JSON.parse(raw);
+    if (!Array.isArray(users)) return [];
+    let changed = false;
+    for (const u of users) {
+      if (!u || typeof u !== "object") continue;
+      const canonicalDealer = resolveUserDealerId(u.email, u.dealerId);
+      if (canonicalDealer && String(u.dealerId || "").trim() !== canonicalDealer) {
+        u.dealerId = canonicalDealer;
+        changed = true;
+      }
+      const normalizedEmail = normalizeEmail(u.email);
+      if (normalizedEmail && normalizedEmail !== String(u.email || "")) {
+        u.email = normalizedEmail;
+        changed = true;
+      }
+      const normalizedRole = normalizeRole(u.role);
+      if (normalizedRole !== String(u.role || "")) {
+        u.role = normalizedRole;
+        changed = true;
+      }
+    }
+    if (changed) writeUsers(users);
+    return users;
   } catch (_) {
     return [];
   }
@@ -184,6 +264,55 @@ function normalizeRole(input) {
   return "sales_person";
 }
 
+function normalizeDealerToken(input) {
+  let v = String(input || "").trim().toLowerCase();
+  if ((v.startsWith("\"") && v.endsWith("\"")) || (v.startsWith("'") && v.endsWith("'"))) {
+    v = v.slice(1, -1).trim();
+  }
+  return v;
+}
+
+function normalizeEmail(input) {
+  return String(input || "").trim().toLowerCase();
+}
+
+function parseMap(raw) {
+  const map = new Map();
+  const text = String(raw || "").trim();
+  if (!text) return map;
+  for (const token of text.split(",")) {
+    const pair = token.trim();
+    if (!pair) continue;
+    const idx = pair.indexOf("=");
+    if (idx <= 0 || idx >= pair.length - 1) continue;
+    const key = normalizeDealerToken(pair.slice(0, idx));
+    const value = normalizeDealerToken(pair.slice(idx + 1));
+    if (key && value) map.set(key, value);
+  }
+  return map;
+}
+
+const AUTH_DEALER_ID_ALIASES = parseMap(AUTH_DEALER_ID_ALIASES_RAW);
+const AUTH_EMAIL_DEALER_MAP = parseMap(AUTH_EMAIL_DEALER_MAP_RAW);
+
+function canonicalDealerId(input) {
+  const raw = normalizeDealerToken(input);
+  if (!raw) return "";
+  if (AUTH_DEALER_ID_ALIASES.has(raw)) {
+    return normalizeDealerToken(AUTH_DEALER_ID_ALIASES.get(raw));
+  }
+  const dealerPrefixNumeric = raw.match(/^dealer_(\d+)$/);
+  if (dealerPrefixNumeric) return dealerPrefixNumeric[1];
+  return raw;
+}
+
+function resolveUserDealerId(email, dealerId) {
+  const normalizedEmail = normalizeEmail(email);
+  const mapped = normalizedEmail ? AUTH_EMAIL_DEALER_MAP.get(normalizedEmail) : "";
+  const resolved = canonicalDealerId(mapped || dealerId);
+  return resolved || "dealer_default";
+}
+
 function sanitizeUser(user) {
   const state = readSessionState();
   const rawLock =
@@ -195,7 +324,7 @@ function sanitizeUser(user) {
   return {
     userId: user.userId || "",
     email: user.email || "",
-    dealerId: user.dealerId || "dealer_default",
+    dealerId: resolveUserDealerId(user.email, user.dealerId),
     branchId: user.branchId || "branch_default",
     role: normalizeRole(user.role),
     active: user.active !== false,
@@ -222,8 +351,15 @@ function verifyAccessToken(req, res, next) {
     if (tokenSessionVersion !== userSessionVersion) {
       return res.status(401).json({ error: "session_version_mismatch" });
     }
-    req.authClaims = claims;
-    req.authUser = user;
+    const canonicalDealer = resolveUserDealerId(user.email, user.dealerId);
+    req.authClaims = {
+      ...claims,
+      email: normalizeEmail(user.email || claims.email || ""),
+      dealerId: canonicalDealer,
+      role: normalizeRole(user.role || claims.role),
+      userId: user.userId || claims.userId || claims.sub || "",
+    };
+    req.authUser = { ...user, dealerId: canonicalDealer };
     next();
   } catch (_) {
     return res.status(401).json({ error: "invalid_token" });
@@ -247,7 +383,7 @@ const requireAdmin = requireRoleSet(["dealer_principal", "sales_manager"]);
 const requireDealerUser = requireRoleSet(["dealer_principal", "sales_manager", "sales_person"]);
 
 function getScopedDealerIdFromClaims(claims) {
-  return String(claims?.dealerId || "").trim();
+  return canonicalDealerId(claims?.dealerId || "");
 }
 
 function resolveClientIp(req) {
@@ -284,7 +420,7 @@ app.post("/api/v1/auth/register", async (req, res) => {
     userId: `usr_${uuidv4()}`,
     email,
     passwordHash,
-    dealerId: String(dealerId || "dealer_default"),
+    dealerId: resolveUserDealerId(email, dealerId),
     branchId: String(branchId || "branch_default"),
     role: normalizeRole(role),
     active: true,
@@ -300,7 +436,7 @@ app.post("/api/v1/auth/register", async (req, res) => {
     actorEmail: email,
     targetUserId: null,
     targetEmail: email,
-    dealerId: String(dealerId || "dealer_default"),
+    dealerId: resolveUserDealerId(email, dealerId),
     details: { method: "self_register" },
   });
 
@@ -339,7 +475,7 @@ app.post("/api/v1/auth/login", async (req, res) => {
       actorEmail: user.email,
       targetUserId: user.userId || null,
       targetEmail: user.email,
-      dealerId: user.dealerId || null,
+      dealerId: resolveUserDealerId(user.email, user.dealerId) || null,
       details: { lockUntil: new Date(lockUntil).toISOString(), ip: clientIp },
     });
     return res.status(423).json({ error: "account_locked", lockUntil: new Date(lockUntil).toISOString() });
@@ -377,12 +513,18 @@ app.post("/api/v1/auth/login", async (req, res) => {
   }
   clearFailedLogin(loginKey, String(user.userId || ""));
 
+  const canonicalDealerIdForUser = resolveUserDealerId(user.email, user.dealerId);
+  if (canonicalDealerIdForUser !== String(user.dealerId || "").trim()) {
+    user.dealerId = canonicalDealerIdForUser;
+    writeUsers(users);
+  }
+
   const accessToken = jwt.sign(
     {
       sub: user.email,
       email: user.email,
       userId: user.userId || `usr_${Buffer.from(user.email).toString("hex").slice(0, 10)}`,
-      dealerId: user.dealerId || "dealer_default",
+      dealerId: canonicalDealerIdForUser,
       branchId: user.branchId || "branch_default",
       role: normalizeRole(user.role),
       sv: Number(user.sessionVersion || 1),
@@ -397,7 +539,7 @@ app.post("/api/v1/auth/login", async (req, res) => {
     actorEmail: user.email,
     targetUserId: user.userId || null,
     targetEmail: user.email,
-    dealerId: user.dealerId || null,
+    dealerId: canonicalDealerIdForUser || null,
     details: { ip: clientIp },
   });
 
@@ -407,7 +549,7 @@ app.post("/api/v1/auth/login", async (req, res) => {
     user: {
       userId: user.userId || "",
       email: user.email,
-      dealerId: user.dealerId || "dealer_default",
+      dealerId: canonicalDealerIdForUser,
       branchId: user.branchId || "branch_default",
       role: normalizeRole(user.role),
       mustChangePassword: user.mustChangePassword === true,
@@ -455,7 +597,7 @@ app.get("/api/v1/admin/users", requireAdmin, (_req, res) => {
     return res.status(403).json({ error: "missing_dealer_scope" });
   }
   const users = readUsers()
-    .filter((u) => String(u.dealerId || "").trim() === scopedDealerId)
+    .filter((u) => resolveUserDealerId(u.email, u.dealerId) === scopedDealerId)
     .map(sanitizeUser);
   return res.json({ users, count: users.length });
 });
@@ -474,7 +616,7 @@ app.post("/api/v1/admin/users", requireAdmin, async (req, res) => {
     return res.status(403).json({ error: "missing_dealer_scope" });
   }
   const requestedDealerId = String(dealerId || "").trim();
-  if (requestedDealerId && requestedDealerId !== scopedDealerId) {
+  if (requestedDealerId && canonicalDealerId(requestedDealerId) !== scopedDealerId) {
     return res.status(403).json({ error: "cross_dealer_user_create_forbidden" });
   }
 
@@ -483,7 +625,7 @@ app.post("/api/v1/admin/users", requireAdmin, async (req, res) => {
     userId: `usr_${uuidv4()}`,
     email: String(email).trim(),
     passwordHash,
-    dealerId: scopedDealerId,
+    dealerId: resolveUserDealerId(email, scopedDealerId),
     branchId: String(branchId || "branch_default"),
     role: normalizeRole(role),
     active: true,
@@ -518,7 +660,7 @@ app.patch("/api/v1/admin/users/:userId/role", requireAdmin, (req, res) => {
   if (idx < 0) return res.status(404).json({ error: "not_found" });
   const scopedDealerId = getScopedDealerIdFromClaims(req.authClaims);
   if (!scopedDealerId) return res.status(403).json({ error: "missing_dealer_scope" });
-  if (String(users[idx].dealerId || "").trim() !== scopedDealerId) {
+  if (resolveUserDealerId(users[idx].email, users[idx].dealerId) !== scopedDealerId) {
     return res.status(403).json({ error: "cross_dealer_role_change_forbidden" });
   }
   users[idx].role = role;
@@ -546,7 +688,7 @@ app.patch("/api/v1/admin/users/:userId/status", requireAdmin, (req, res) => {
   if (idx < 0) return res.status(404).json({ error: "not_found" });
   const scopedDealerId = getScopedDealerIdFromClaims(req.authClaims);
   if (!scopedDealerId) return res.status(403).json({ error: "missing_dealer_scope" });
-  if (String(users[idx].dealerId || "").trim() !== scopedDealerId) {
+  if (resolveUserDealerId(users[idx].email, users[idx].dealerId) !== scopedDealerId) {
     return res.status(403).json({ error: "cross_dealer_status_change_forbidden" });
   }
   if (active === false && String(req.authClaims?.userId || "").trim() === userId) {
@@ -578,7 +720,7 @@ app.post("/api/v1/admin/users/:userId/reset-password", requireAdmin, async (req,
   if (idx < 0) return res.status(404).json({ error: "not_found" });
   const scopedDealerId = getScopedDealerIdFromClaims(req.authClaims);
   if (!scopedDealerId) return res.status(403).json({ error: "missing_dealer_scope" });
-  if (String(users[idx].dealerId || "").trim() !== scopedDealerId) {
+  if (resolveUserDealerId(users[idx].email, users[idx].dealerId) !== scopedDealerId) {
     return res.status(403).json({ error: "cross_dealer_password_reset_forbidden" });
   }
   if (!passwordMeetsPolicy(newPassword)) {
@@ -615,7 +757,7 @@ app.post("/api/v1/admin/users/:userId/unlock", requireAdmin, (req, res) => {
   if (idx < 0) return res.status(404).json({ error: "not_found" });
   const scopedDealerId = getScopedDealerIdFromClaims(req.authClaims);
   if (!scopedDealerId) return res.status(403).json({ error: "missing_dealer_scope" });
-  if (String(users[idx].dealerId || "").trim() !== scopedDealerId) {
+  if (resolveUserDealerId(users[idx].email, users[idx].dealerId) !== scopedDealerId) {
     return res.status(403).json({ error: "cross_dealer_unlock_forbidden" });
   }
   clearUserLock(String(users[idx].userId || ""));
@@ -674,7 +816,7 @@ app.post("/api/v1/auth/change-password", requireAuth, async (req, res) => {
     actorEmail: user.email,
     targetUserId: user.userId || null,
     targetEmail: user.email,
-    dealerId: user.dealerId || null,
+    dealerId: resolveUserDealerId(user.email, user.dealerId) || null,
     details: {},
   });
   return res.json({ ok: true });
@@ -688,7 +830,7 @@ app.get("/api/v1/admin/audit-events", requireDealerUser, (req, res) => {
   const actionFilter = String(req.query?.action || "").trim().toLowerCase();
   const userFilter = String(req.query?.user || "").trim().toLowerCase();
   const events = readAuditLog()
-    .filter((evt) => String(evt.dealerId || "").trim() === scopedDealerId)
+    .filter((evt) => canonicalDealerId(evt.dealerId) === scopedDealerId)
     .filter((evt) => {
       if (!actionFilter) return true;
       return String(evt.type || "").toLowerCase().includes(actionFilter);
@@ -707,5 +849,8 @@ app.get("/api/v1/admin/audit-events", requireDealerUser, (req, res) => {
 app.listen(PORT, () => {
   console.log(`cubeone-auth listening on http://0.0.0.0:${PORT}`);
   console.log(`[cubeone-auth] data dir: ${AUTH_DATA_DIR}`);
+  console.log(
+    `[cubeone-auth] dealer aliases: ${AUTH_DEALER_ID_ALIASES.size}, email dealer overrides: ${AUTH_EMAIL_DEALER_MAP.size}, tenant config source: ${TENANT_CONFIG.source}`
+  );
 });
 

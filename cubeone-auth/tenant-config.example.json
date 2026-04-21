@@ -1,0 +1,14 @@
+{
+  "dealerAliases": {
+    "dealer_cubeone_connector_onrender_com": "1257",
+    "dealer_ldc": "1257",
+    "dealer_drivex": "510",
+    "dealer_integra": "501"
+  },
+  "emailDealerMap": {
+    "ldc.admin@cubeonescan.local": "1257",
+    "drivex.admin@cubeonescan.local": "510",
+    "drivex.ops2@cubeonescan.local": "510",
+    "integra.admin@cubeonescan.local": "501"
+  }
+}

@@ -38,13 +38,13 @@ object AuthStore {
         } else {
             editor.remove(KEY_REFRESH_TOKEN)
         }
-        if (!userId.isNullOrBlank()) editor.putString(KEY_USER_ID, userId)
-        if (!dealerId.isNullOrBlank()) editor.putString(KEY_DEALER_ID, dealerId)
-        if (!branchId.isNullOrBlank()) editor.putString(KEY_BRANCH_ID, branchId)
-        if (!role.isNullOrBlank()) editor.putString(KEY_ROLE, role)
-        if (!userEmail.isNullOrBlank()) editor.putString(KEY_USER_EMAIL, userEmail)
-        if (!displayName.isNullOrBlank()) editor.putString(KEY_DISPLAY_NAME, displayName)
-        if (!dealershipName.isNullOrBlank()) editor.putString(KEY_DEALERSHIP_NAME, dealershipName)
+        if (!userId.isNullOrBlank()) editor.putString(KEY_USER_ID, userId) else editor.remove(KEY_USER_ID)
+        if (!dealerId.isNullOrBlank()) editor.putString(KEY_DEALER_ID, dealerId) else editor.remove(KEY_DEALER_ID)
+        if (!branchId.isNullOrBlank()) editor.putString(KEY_BRANCH_ID, branchId) else editor.remove(KEY_BRANCH_ID)
+        if (!role.isNullOrBlank()) editor.putString(KEY_ROLE, role) else editor.remove(KEY_ROLE)
+        if (!userEmail.isNullOrBlank()) editor.putString(KEY_USER_EMAIL, userEmail) else editor.remove(KEY_USER_EMAIL)
+        if (!displayName.isNullOrBlank()) editor.putString(KEY_DISPLAY_NAME, displayName) else editor.remove(KEY_DISPLAY_NAME)
+        if (!dealershipName.isNullOrBlank()) editor.putString(KEY_DEALERSHIP_NAME, dealershipName) else editor.remove(KEY_DEALERSHIP_NAME)
         if (mustChangePassword != null) editor.putBoolean(KEY_MUST_CHANGE_PASSWORD, mustChangePassword)
         editor.apply()
     }

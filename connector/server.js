@@ -14,6 +14,76 @@ try {
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
+function normalizeConfigToken(input) {
+  let v = String(input || "").trim();
+  if ((v.startsWith("\"") && v.endsWith("\"")) || (v.startsWith("'") && v.endsWith("'"))) {
+    v = v.slice(1, -1).trim();
+  }
+  return v;
+}
+
+function normalizeConfigMap(raw) {
+  const out = [];
+  if (!raw) return "";
+  if (typeof raw === "string") return normalizeConfigToken(raw);
+  if (typeof raw === "object") {
+    for (const [k, v] of Object.entries(raw)) {
+      const key = normalizeConfigToken(k);
+      const value = normalizeConfigToken(v);
+      if (key && value) out.push(`${key}=${value}`);
+    }
+  }
+  return out.join(",");
+}
+
+function normalizeConfigList(raw) {
+  if (!raw) return "";
+  if (typeof raw === "string") return normalizeConfigToken(raw);
+  if (Array.isArray(raw)) return raw.map((x) => normalizeConfigToken(x)).filter(Boolean).join(",");
+  return "";
+}
+
+function loadTenantConfig() {
+  const rawJson = String(process.env.TENANT_CONFIG_JSON || "").trim();
+  const configFile = String(process.env.TENANT_CONFIG_FILE || "").trim();
+  const candidates = [];
+  if (rawJson) candidates.push({ source: "TENANT_CONFIG_JSON", text: rawJson });
+  if (configFile) {
+    try {
+      if (fs.existsSync(configFile)) {
+        candidates.push({ source: `TENANT_CONFIG_FILE:${configFile}`, text: fs.readFileSync(configFile, "utf8") });
+      }
+    } catch (_) {
+      // Fall through to env defaults.
+    }
+  }
+  for (const c of candidates) {
+    try {
+      const parsed = JSON.parse(c.text);
+      return {
+        source: c.source,
+        dealerAliasesRaw: normalizeConfigMap(parsed?.dealerAliases),
+        userEmailDealerMapRaw: normalizeConfigMap(parsed?.emailDealerMap),
+        vmgDealerScopesRaw: normalizeConfigList(parsed?.vmgDealerScopes),
+        evolvesaLeadReceivingEntityMapRaw: normalizeConfigMap(parsed?.evolvesaLeadReceivingEntityMap),
+        evolvesaLeadTriggerUrlByDealerRaw: normalizeConfigMap(parsed?.evolvesaLeadTriggerUrlByDealer),
+      };
+    } catch (_) {
+      // Try next candidate.
+    }
+  }
+  return {
+    source: "env_defaults",
+    dealerAliasesRaw: "",
+    userEmailDealerMapRaw: "",
+    vmgDealerScopesRaw: "",
+    evolvesaLeadReceivingEntityMapRaw: "",
+    evolvesaLeadTriggerUrlByDealerRaw: "",
+  };
+}
+
+const TENANT_CONFIG = loadTenantConfig();
+
 const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.API_KEY || "change-me";
 const EVOLVESA_BASE_URL = (process.env.EVOLVESA_BASE_URL || "").trim().replace(/\/$/, "");
@@ -24,8 +94,16 @@ const EVOLVESA_STOCK_TRIGGER_URL = (process.env.EVOLVESA_STOCK_TRIGGER_URL || ""
 const EVOLVESA_LEAD_TRIGGER_URL = (process.env.EVOLVESA_LEAD_TRIGGER_URL || "").trim();
 const EVOLVESA_LEAD_RECEIVING_ENTITY_ID = (process.env.EVOLVESA_LEAD_RECEIVING_ENTITY_ID || "505").trim();
 const EVOLVESA_LEAD_RECEIVING_ENTITY_NAME = (process.env.EVOLVESA_LEAD_RECEIVING_ENTITY_NAME || "LDC").trim();
-const EVOLVESA_LEAD_RECEIVING_ENTITY_MAP_RAW = (process.env.EVOLVESA_LEAD_RECEIVING_ENTITY_MAP || "").trim();
-const EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER_RAW = (process.env.EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER || "").trim();
+const EVOLVESA_LEAD_RECEIVING_ENTITY_MAP_RAW = (
+  TENANT_CONFIG.evolvesaLeadReceivingEntityMapRaw ||
+  process.env.EVOLVESA_LEAD_RECEIVING_ENTITY_MAP ||
+  ""
+).trim();
+const EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER_RAW = (
+  TENANT_CONFIG.evolvesaLeadTriggerUrlByDealerRaw ||
+  process.env.EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER ||
+  ""
+).trim();
 const EVOLVESA_LEAD_SOURCE = (process.env.EVOLVESA_LEAD_SOURCE || "CubeOneScan").trim();
 const EVOLVESA_LEAD_SOURCE_ID = (process.env.EVOLVESA_LEAD_SOURCE_ID || "").trim();
 const EVOLVESA_STOCK_SOURCE = (process.env.EVOLVESA_STOCK_SOURCE || "CubeOneScan").trim();
@@ -41,11 +119,16 @@ const AUTOTRADER_TIMEOUT_MS = Number(process.env.AUTOTRADER_TIMEOUT_MS || 12000)
 const AUTOTRADER_LISTINGS_CACHE_TTL_MS = Number(process.env.AUTOTRADER_LISTINGS_CACHE_TTL_MS || 300000);
 const AUTOTRADER_RATE_LIMIT_COOLDOWN_MS = Number(process.env.AUTOTRADER_RATE_LIMIT_COOLDOWN_MS || 180000);
 const VMG_STOCK_FEED_URL = (process.env.VMG_STOCK_FEED_URL || "").trim();
-const VMG_DEALER_SCOPES_RAW = (process.env.VMG_DEALER_SCOPES || "509").trim();
+// Comma-separated VMG/DMS dealer ids that use VMG_STOCK_FEED_URL (not EvolveSA portal company ids).
+const VMG_DEALER_SCOPES_RAW = (TENANT_CONFIG.vmgDealerScopesRaw || process.env.VMG_DEALER_SCOPES || "").trim();
 const VMG_TIMEOUT_MS = Number(process.env.VMG_TIMEOUT_MS || 12000);
 const VMG_CACHE_TTL_MS = Number(process.env.VMG_CACHE_TTL_MS || 300000);
-const DEALER_ID_ALIASES_RAW = (process.env.DEALER_ID_ALIASES || "").trim();
-const USER_EMAIL_DEALER_MAP_RAW = (process.env.USER_EMAIL_DEALER_MAP || "").trim();
+const DEALER_ID_ALIASES_RAW = (TENANT_CONFIG.dealerAliasesRaw || process.env.DEALER_ID_ALIASES || "").trim();
+const USER_EMAIL_DEALER_MAP_RAW = (
+  TENANT_CONFIG.userEmailDealerMapRaw ||
+  process.env.USER_EMAIL_DEALER_MAP ||
+  ""
+).trim();
 const ENFORCE_TENANT_RINGFENCE = String(process.env.ENFORCE_TENANT_RINGFENCE || "1").trim() !== "0";
 const AUTH_JWT_SECRET = (process.env.AUTH_JWT_SECRET || "").trim();
 const COMMAND_MAX_RETRIES = Number(process.env.COMMAND_MAX_RETRIES || 3);
@@ -161,6 +244,13 @@ function requireAuth(req, res, next) {
   next();
 }
 
+function canonicalDealerId(value) {
+  const raw = normalizeDealerToken(value);
+  if (!raw) return "";
+  const aliased = DEALER_ID_ALIASES.get(raw);
+  return String(aliased || raw).trim();
+}
+
 function extractTenantContext(req, res, next) {
     const userToken = String(req.headers["x-user-token"] || "").trim();
     let claims = {};
@@ -175,8 +265,11 @@ function extractTenantContext(req, res, next) {
     const headerBranchId = String(req.headers["x-branch-id"] || "").trim();
     const headerRole = String(req.headers["x-user-role"] || "").trim();
     const resolvedUserEmail = String(claims.email || claims.userEmail || req.headers["x-user-email"] || "").trim().toLowerCase();
-    const mappedDealerId = resolvedUserEmail ? USER_EMAIL_DEALER_MAP.get(resolvedUserEmail) : null;
+    const mappedDealerIdRaw = resolvedUserEmail ? USER_EMAIL_DEALER_MAP.get(resolvedUserEmail) : null;
+    const mappedDealerId = canonicalDealerId(mappedDealerIdRaw);
     const tokenDealerId = String(claims.dealerId || "").trim();
+    const headerDealerCanonical = canonicalDealerId(headerDealerId);
+    const tokenDealerCanonical = canonicalDealerId(tokenDealerId);
     if (ENFORCE_TENANT_RINGFENCE && USER_EMAIL_DEALER_MAP.size > 0) {
       if (!resolvedUserEmail) {
         return sendApiError(req, res, 403, "tenant_identity_missing", "Missing user email in auth context.");
@@ -184,14 +277,14 @@ function extractTenantContext(req, res, next) {
       if (!mappedDealerId) {
         return sendApiError(req, res, 403, "tenant_not_mapped", "User is not mapped to a dealership in USER_EMAIL_DEALER_MAP.");
       }
-      if (headerDealerId && headerDealerId !== mappedDealerId) {
+      if (headerDealerCanonical && headerDealerCanonical !== mappedDealerId) {
         return sendApiError(req, res, 403, "tenant_mismatch", "Header dealer scope does not match mapped user dealership.");
       }
-      if (tokenDealerId && tokenDealerId !== mappedDealerId) {
+      if (tokenDealerCanonical && tokenDealerCanonical !== mappedDealerId) {
         return sendApiError(req, res, 403, "tenant_mismatch", "Token dealer scope does not match mapped user dealership.");
       }
     }
-    const effectiveDealerId = mappedDealerId || headerDealerId || tokenDealerId || null;
+    const effectiveDealerId = mappedDealerId || headerDealerCanonical || tokenDealerCanonical || null;
     if (!headerDealerId && mappedDealerId && String(claims.dealerId || "").trim() !== String(mappedDealerId)) {
       log("info", "tenant_dealer_overridden_by_email_map", {
         userEmail: resolvedUserEmail,
@@ -640,6 +733,19 @@ function validateCommandPayload(commandType, payload) {
 }
 
 function sendApiError(req, res, status, error, hint = null, extra = {}) {
+  if (status >= 400) {
+    log(status >= 500 ? "error" : "warn", "api_rejected", {
+      requestId: req.requestId || null,
+      status,
+      error,
+      hint,
+      path: req.path || null,
+      method: req.method || null,
+      tenantUserEmail: req.tenantContext?.userEmail || null,
+      tenantDealerId: req.tenantContext?.dealerId || null,
+      tenantRole: req.tenantContext?.role || null,
+    });
+  }
   return res.status(status).json({
     error,
     hint,
@@ -1297,7 +1403,14 @@ function normalizeStockRow(row = {}) {
 }
 
 function normalizeDealerToken(value) {
-  return String(value || "").trim().toLowerCase();
+  let token = String(value || "").trim();
+  if (
+    (token.startsWith("\"") && token.endsWith("\"")) ||
+    (token.startsWith("'") && token.endsWith("'"))
+  ) {
+    token = token.slice(1, -1).trim();
+  }
+  return token.toLowerCase();
 }
 
 function normalizeDealerDigits(value) {
@@ -3354,6 +3467,7 @@ app.listen(PORT, "0.0.0.0", () => {
     storeFile: STORE_FILE,
     tenantRingfence: ENFORCE_TENANT_RINGFENCE,
     mappedUsers: USER_EMAIL_DEALER_MAP.size,
+    tenantConfigSource: TENANT_CONFIG.source,
   });
 });
 

@@ -75,7 +75,7 @@ services:
       - key: VMG_STOCK_FEED_URL
         sync: false
       - key: VMG_DEALER_SCOPES
-        value: "509"
+        value: "1257,501" # VMG/DMS ids (e.g. LDC 1257); not Evolve portal company id 509
       - key: VMG_TIMEOUT_MS
         value: "12000"
       - key: VMG_CACHE_TTL_MS
