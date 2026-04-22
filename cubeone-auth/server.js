@@ -95,6 +95,20 @@ let AUTH_EMAIL_DEALER_MAP_RAW = String(
 ).trim();
 const TENANT_ADMIN_TOKEN = String(process.env.TENANT_ADMIN_TOKEN || "").trim();
 const TENANT_CONFIG_RUNTIME_FILE = path.join(AUTH_DATA_DIR, "tenant-config.runtime.json");
+const TENANT_CONFIG_HISTORY_FILE = path.join(AUTH_DATA_DIR, "tenant-config.history.json");
+const TENANT_CONFIG_PROPOSALS_FILE = path.join(AUTH_DATA_DIR, "tenant-config.proposals.json");
+const TENANT_ADMIN_EDITOR_ROLES = new Set(
+  String(process.env.TENANT_ADMIN_EDITOR_ROLES || "dealer_principal,tenant_admin_editor")
+    .split(",")
+    .map((x) => normalizeRole(x))
+    .filter(Boolean)
+);
+const TENANT_ADMIN_APPROVER_ROLES = new Set(
+  String(process.env.TENANT_ADMIN_APPROVER_ROLES || "dealer_principal,tenant_admin_approver")
+    .split(",")
+    .map((x) => normalizeRole(x))
+    .filter(Boolean)
+);
 const BUSINESS_ROLES = ["dealer_principal", "sales_manager", "sales_person"];
 const LOGIN_MAX_FAILED_ATTEMPTS = Number(process.env.LOGIN_MAX_FAILED_ATTEMPTS || 5);
 const LOGIN_WINDOW_MS = Number(process.env.LOGIN_WINDOW_MS || 15 * 60 * 1000);
@@ -318,6 +332,52 @@ function tenantConfigSnapshot() {
   };
 }
 
+function readTenantConfigHistory() {
+  try {
+    if (!fs.existsSync(TENANT_CONFIG_HISTORY_FILE)) return [];
+    const parsed = JSON.parse(fs.readFileSync(TENANT_CONFIG_HISTORY_FILE, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function appendTenantConfigHistory(action, payload, req = null) {
+  const history = readTenantConfigHistory();
+  history.push({
+    id: `tconf_${uuidv4()}`,
+    action,
+    at: new Date().toISOString(),
+    actorUserId: String(req?.authClaims?.userId || "").trim() || null,
+    actorEmail: String(req?.authClaims?.email || "").trim().toLowerCase() || null,
+    actorIp: req?.ip || null,
+    payload,
+  });
+  const bounded = history.slice(-200);
+  fs.writeFileSync(TENANT_CONFIG_HISTORY_FILE, JSON.stringify(bounded, null, 2), "utf8");
+  return bounded;
+}
+
+function readTenantConfigProposals() {
+  try {
+    if (!fs.existsSync(TENANT_CONFIG_PROPOSALS_FILE)) return [];
+    const parsed = JSON.parse(fs.readFileSync(TENANT_CONFIG_PROPOSALS_FILE, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function writeTenantConfigProposals(items) {
+  const bounded = Array.isArray(items) ? items.slice(-500) : [];
+  fs.writeFileSync(TENANT_CONFIG_PROPOSALS_FILE, JSON.stringify(bounded, null, 2), "utf8");
+}
+
+function isTenantRoleAllowed(claims, allowedRolesSet) {
+  const role = normalizeRole(claims?.role);
+  return Boolean(role && allowedRolesSet.has(role));
+}
+
 function validateTenantConfigPayload(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return "tenant config payload must be a JSON object";
@@ -331,6 +391,43 @@ function validateTenantConfigPayload(payload) {
     }
   }
   return null;
+}
+
+function buildTenantConfigPreflightReport(payload) {
+  const issues = [];
+  const warnings = [];
+  const dealerAliases = payload?.dealerAliases && typeof payload.dealerAliases === "object" ? payload.dealerAliases : {};
+  const emailDealerMap = payload?.emailDealerMap && typeof payload.emailDealerMap === "object" ? payload.emailDealerMap : {};
+
+  for (const [rawFrom, rawTo] of Object.entries(dealerAliases)) {
+    const from = normalizeDealerToken(rawFrom);
+    const to = normalizeDealerToken(rawTo);
+    if (!from || !to) {
+      issues.push(`dealerAliases has empty key/value pair: "${rawFrom}"="${rawTo}"`);
+      continue;
+    }
+    if (from === to) warnings.push(`dealerAliases contains no-op mapping: ${from}=${to}`);
+  }
+
+  for (const [rawEmail, rawDealer] of Object.entries(emailDealerMap)) {
+    const email = normalizeEmail(rawEmail);
+    const dealer = normalizeDealerToken(rawDealer);
+    if (!email) issues.push(`emailDealerMap has invalid email key: "${rawEmail}"`);
+    if (!dealer) issues.push(`emailDealerMap has empty dealer for "${rawEmail}"`);
+    if (email && dealerAliases && dealerAliases[dealer]) {
+      warnings.push(`emailDealerMap value "${dealer}" is aliased; canonical value will be resolved at runtime`);
+    }
+  }
+
+  return {
+    valid: issues.length === 0,
+    issues,
+    warnings,
+    summary: {
+      dealerAliases: Object.keys(dealerAliases).length,
+      emailDealerMap: Object.keys(emailDealerMap).length,
+    },
+  };
 }
 
 function applyTenantConfigPayload(payload, sourceLabel = "admin_api") {
@@ -481,7 +578,27 @@ app.get("/api/v1/admin/tenant-config", requireTenantAdmin, (_req, res) => {
   });
 });
 
+app.get("/api/v1/admin/tenant-config/history", requireTenantAdmin, (req, res) => {
+  const limitRaw = Number(req.query.limit || 50);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.floor(limitRaw))) : 50;
+  const history = readTenantConfigHistory().slice(-limit).reverse();
+  return res.json({ ok: true, count: history.length, history });
+});
+
+app.post("/api/v1/admin/tenant-config/preflight", requireTenantAdmin, (req, res) => {
+  const payload = req.body || {};
+  const validationError = validateTenantConfigPayload(payload);
+  if (validationError) {
+    return res.status(400).json({ ok: false, error: "invalid_tenant_config", detail: validationError });
+  }
+  const report = buildTenantConfigPreflightReport(payload);
+  return res.json({ ok: true, preflight: report });
+});
+
 app.put("/api/v1/admin/tenant-config", requireTenantAdmin, (req, res) => {
+  if (!isTenantRoleAllowed(req.authClaims, TENANT_ADMIN_EDITOR_ROLES)) {
+    return res.status(403).json({ error: "forbidden", hint: "tenant_admin_editor_required" });
+  }
   const payload = req.body || {};
   const validationError = validateTenantConfigPayload(payload);
   if (validationError) {
@@ -491,6 +608,7 @@ app.put("/api/v1/admin/tenant-config", requireTenantAdmin, (req, res) => {
   try {
     fs.mkdirSync(AUTH_DATA_DIR, { recursive: true });
     fs.writeFileSync(TENANT_CONFIG_RUNTIME_FILE, JSON.stringify(payload, null, 2), "utf8");
+    appendTenantConfigHistory("update", payload, req);
   } catch (e) {
     return res.status(500).json({
       error: "tenant_config_persist_failed",
@@ -500,6 +618,128 @@ app.put("/api/v1/admin/tenant-config", requireTenantAdmin, (req, res) => {
   }
   return res.json({
     ok: true,
+    savedTo: TENANT_CONFIG_RUNTIME_FILE,
+    ...tenantConfigSnapshot(),
+  });
+});
+
+app.get("/api/v1/admin/tenant-config/proposals", requireTenantAdmin, (req, res) => {
+  const items = readTenantConfigProposals().slice().reverse();
+  return res.json({ ok: true, count: items.length, proposals: items });
+});
+
+app.post("/api/v1/admin/tenant-config/proposals", requireTenantAdmin, (req, res) => {
+  if (!isTenantRoleAllowed(req.authClaims, TENANT_ADMIN_EDITOR_ROLES)) {
+    return res.status(403).json({ error: "forbidden", hint: "tenant_admin_editor_required" });
+  }
+  const payload = req.body || {};
+  const validationError = validateTenantConfigPayload(payload);
+  if (validationError) {
+    return res.status(400).json({ error: "invalid_tenant_config", detail: validationError });
+  }
+  const proposals = readTenantConfigProposals();
+  const proposal = {
+    id: `prop_${uuidv4()}`,
+    status: "pending",
+    createdAt: new Date().toISOString(),
+    createdBy: String(req.authClaims?.email || "").trim().toLowerCase() || "unknown",
+    payload,
+  };
+  proposals.push(proposal);
+  try {
+    fs.mkdirSync(AUTH_DATA_DIR, { recursive: true });
+    writeTenantConfigProposals(proposals);
+  } catch (e) {
+    return res.status(500).json({ error: "proposal_persist_failed", detail: e?.message || String(e) });
+  }
+  return res.status(202).json({ ok: true, proposal });
+});
+
+app.post("/api/v1/admin/tenant-config/proposals/:id/approve", requireTenantAdmin, (req, res) => {
+  if (!isTenantRoleAllowed(req.authClaims, TENANT_ADMIN_APPROVER_ROLES)) {
+    return res.status(403).json({ error: "forbidden", hint: "tenant_admin_approver_required" });
+  }
+  const id = String(req.params.id || "").trim();
+  if (!id) return res.status(400).json({ error: "id_required" });
+  const actorEmail = String(req.authClaims?.email || "").trim().toLowerCase();
+  const proposals = readTenantConfigProposals();
+  const idx = proposals.findIndex((x) => String(x?.id || "") === id);
+  if (idx < 0) return res.status(404).json({ error: "proposal_not_found" });
+  const proposal = proposals[idx];
+  if (proposal.status !== "pending") return res.status(409).json({ error: "proposal_not_pending" });
+  if (actorEmail && proposal.createdBy === actorEmail) {
+    return res.status(403).json({ error: "forbidden", hint: "maker_cannot_approve_own_change" });
+  }
+  const validationError = validateTenantConfigPayload(proposal.payload);
+  if (validationError) return res.status(400).json({ error: "invalid_tenant_config", detail: validationError });
+  applyTenantConfigPayload(proposal.payload, "approved_proposal_runtime");
+  try {
+    fs.mkdirSync(AUTH_DATA_DIR, { recursive: true });
+    fs.writeFileSync(TENANT_CONFIG_RUNTIME_FILE, JSON.stringify(proposal.payload, null, 2), "utf8");
+    proposal.status = "approved";
+    proposal.approvedAt = new Date().toISOString();
+    proposal.approvedBy = actorEmail || "unknown";
+    proposals[idx] = proposal;
+    writeTenantConfigProposals(proposals);
+    appendTenantConfigHistory("proposal_approved", proposal.payload, req);
+  } catch (e) {
+    return res.status(500).json({ error: "tenant_config_persist_failed", detail: e?.message || String(e) });
+  }
+  return res.json({ ok: true, proposal, savedTo: TENANT_CONFIG_RUNTIME_FILE, ...tenantConfigSnapshot() });
+});
+
+app.post("/api/v1/admin/tenant-config/proposals/:id/reject", requireTenantAdmin, (req, res) => {
+  if (!isTenantRoleAllowed(req.authClaims, TENANT_ADMIN_APPROVER_ROLES)) {
+    return res.status(403).json({ error: "forbidden", hint: "tenant_admin_approver_required" });
+  }
+  const id = String(req.params.id || "").trim();
+  if (!id) return res.status(400).json({ error: "id_required" });
+  const actorEmail = String(req.authClaims?.email || "").trim().toLowerCase();
+  const proposals = readTenantConfigProposals();
+  const idx = proposals.findIndex((x) => String(x?.id || "") === id);
+  if (idx < 0) return res.status(404).json({ error: "proposal_not_found" });
+  const proposal = proposals[idx];
+  if (proposal.status !== "pending") return res.status(409).json({ error: "proposal_not_pending" });
+  proposal.status = "rejected";
+  proposal.rejectedAt = new Date().toISOString();
+  proposal.rejectedBy = actorEmail || "unknown";
+  proposals[idx] = proposal;
+  try {
+    fs.mkdirSync(AUTH_DATA_DIR, { recursive: true });
+    writeTenantConfigProposals(proposals);
+  } catch (e) {
+    return res.status(500).json({ error: "proposal_persist_failed", detail: e?.message || String(e) });
+  }
+  return res.json({ ok: true, proposal });
+});
+
+app.post("/api/v1/admin/tenant-config/rollback/:id", requireTenantAdmin, (req, res) => {
+  const id = String(req.params.id || "").trim();
+  if (!id) return res.status(400).json({ error: "id_required" });
+  const history = readTenantConfigHistory();
+  const hit = history.find((x) => String(x?.id || "") === id);
+  if (!hit || !hit.payload || typeof hit.payload !== "object") {
+    return res.status(404).json({ error: "history_entry_not_found" });
+  }
+  const validationError = validateTenantConfigPayload(hit.payload);
+  if (validationError) {
+    return res.status(400).json({ error: "invalid_history_payload", detail: validationError });
+  }
+  applyTenantConfigPayload(hit.payload, "rollback_runtime");
+  try {
+    fs.mkdirSync(AUTH_DATA_DIR, { recursive: true });
+    fs.writeFileSync(TENANT_CONFIG_RUNTIME_FILE, JSON.stringify(hit.payload, null, 2), "utf8");
+    appendTenantConfigHistory("rollback", hit.payload, req);
+  } catch (e) {
+    return res.status(500).json({
+      error: "tenant_config_persist_failed",
+      detail: e?.message || String(e),
+      appliedInMemory: true,
+    });
+  }
+  return res.json({
+    ok: true,
+    rolledBackTo: id,
     savedTo: TENANT_CONFIG_RUNTIME_FILE,
     ...tenantConfigSnapshot(),
   });

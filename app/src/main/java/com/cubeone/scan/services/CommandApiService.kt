@@ -81,6 +81,11 @@ object CommandApiService {
         val warning: String?
     )
 
+    data class JsonEnvelopeResponse(
+        val ok: Boolean,
+        val json: JSONObject
+    )
+
     private data class QueuedCommand(
         val commandType: String,
         val correlationId: String?,
@@ -388,6 +393,60 @@ object CommandApiService {
 
     fun getQueuedCommandCount(context: Context): Int = loadQueue(context).size
 
+    fun getKpis(
+        context: Context,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) = getJson(context, "/api/v1/analytics/kpis", onSuccess, onError)
+
+    fun getForecast(
+        context: Context,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) = getJson(context, "/api/v1/analytics/forecast", onSuccess, onError)
+
+    fun getOemRollup(
+        context: Context,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) = getJson(context, "/api/v1/analytics/oem-rollup", onSuccess, onError)
+
+    fun saveTargets(
+        context: Context,
+        targets: JSONObject,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) = putJson(context, "/api/v1/analytics/targets", targets, onSuccess, onError)
+
+    fun startTestDrive(
+        context: Context,
+        payload: JSONObject,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) = postJson(context, "/api/v1/test-drives/start", payload, onSuccess, onError)
+
+    fun testDriveCheckin(
+        context: Context,
+        sessionId: String,
+        payload: JSONObject,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) = postJson(context, "/api/v1/test-drives/$sessionId/checkin", payload, onSuccess, onError)
+
+    fun completeTestDrive(
+        context: Context,
+        sessionId: String,
+        payload: JSONObject,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) = postJson(context, "/api/v1/test-drives/$sessionId/complete", payload, onSuccess, onError)
+
+    fun getActiveTestDrives(
+        context: Context,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) = getJson(context, "/api/v1/test-drives/active", onSuccess, onError)
+
     fun flushQueuedCommands(
         context: Context,
         onProgress: ((remaining: Int) -> Unit)? = null,
@@ -559,6 +618,84 @@ object CommandApiService {
                 onError(e.message ?: "Action failed")
             }
         }.start()
+    }
+
+    private fun getJson(
+        context: Context,
+        path: String,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        Thread {
+            try {
+                val json = requestJson(context, "GET", path, null)
+                onSuccess(json)
+            } catch (e: Exception) {
+                onError(e.message ?: "Request failed")
+            }
+        }.start()
+    }
+
+    private fun postJson(
+        context: Context,
+        path: String,
+        body: JSONObject,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        Thread {
+            try {
+                val json = requestJson(context, "POST", path, body)
+                onSuccess(json)
+            } catch (e: Exception) {
+                onError(e.message ?: "Request failed")
+            }
+        }.start()
+    }
+
+    private fun putJson(
+        context: Context,
+        path: String,
+        body: JSONObject,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        Thread {
+            try {
+                val json = requestJson(context, "PUT", path, body)
+                onSuccess(json)
+            } catch (e: Exception) {
+                onError(e.message ?: "Request failed")
+            }
+        }.start()
+    }
+
+    private fun requestJson(
+        context: Context,
+        method: String,
+        path: String,
+        body: JSONObject?
+    ): JSONObject {
+        val baseUrl = ApiConfig.getBaseUrl(context)
+        val apiKey = ApiConfig.getApiKey(context)
+        val url = URL("$baseUrl$path")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = method
+        conn.setRequestProperty("Authorization", "Bearer $apiKey")
+        conn.setRequestProperty("Content-Type", "application/json")
+        applyUserHeaders(conn, context)
+        AuthStore.getDealerId(context)?.let { conn.setRequestProperty("X-Dealer-Id", it) }
+        AuthStore.getBranchId(context)?.let { conn.setRequestProperty("X-Branch-Id", it) }
+        conn.connectTimeout = 10_000
+        conn.readTimeout = 20_000
+        if (body != null) {
+            conn.doOutput = true
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        }
+        val code = conn.responseCode
+        val resp = readBody(conn)
+        if (code !in 200..299) throw IllegalStateException("HTTP $code: $resp")
+        return JSONObject(resp.ifEmpty { "{}" })
     }
 
 

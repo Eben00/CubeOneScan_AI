@@ -32,12 +32,14 @@ import com.google.android.material.card.MaterialCardView
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URL
+import java.util.Calendar
 import java.util.Locale
 import org.json.JSONObject
 
 class LicenseResultActivity : AppCompatActivity() {
     private var selectedShareImageUri: Uri? = null
     private var selectedStock: CommandApiService.StockItem? = null
+    private var activeTestDriveSessionId: String? = null
     private var senderDisplayName: String = ""
     private var senderDealershipName: String = ""
     private val thumbnailCache: LruCache<String, Bitmap> by lazy {
@@ -234,6 +236,155 @@ class LicenseResultActivity : AppCompatActivity() {
             )
         }
 
+        findViewById<MaterialButton>(R.id.btnQuickCreditCheck).setOnClickListener {
+            val leadCorrelationId = WorkflowState.getLeadCorrelationId(this)
+            if (leadCorrelationId.isNullOrBlank()) {
+                Toast.makeText(this, "Create lead first", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            val hasConsent = findViewById<android.widget.CheckBox>(R.id.cbCreditConsent).isChecked
+            if (!hasConsent) {
+                Toast.makeText(this, "Capture consent before running credit check", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            val cellphone = findViewById<EditText>(R.id.etLeadCellphone).text?.toString().orEmpty().trim()
+            val normalizedCellphone = cellphone.replace(" ", "")
+            if (normalizedCellphone.length < 10) {
+                Toast.makeText(this, getString(R.string.lead_cellphone_required), Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            val email = findViewById<EditText>(R.id.etCreditEmail).text?.toString().orEmpty().trim()
+            val payload = JSONObject().apply {
+                put("leadCorrelationId", leadCorrelationId)
+                put(
+                    "consent",
+                    JSONObject().apply {
+                        put("accepted", true)
+                        put("capturedAt", System.currentTimeMillis())
+                        put("capturedByUserId", AuthStore.getUserId(this@LicenseResultActivity).orEmpty())
+                    }
+                )
+                put(
+                    "applicant",
+                    JSONObject().apply {
+                        put("firstName", initials)
+                        put("surname", surname)
+                        put("idNumber", idNumber)
+                        put("mobile", normalizedCellphone)
+                        put("email", email)
+                    }
+                )
+            }
+            CommandApiService.createCommand(
+                context = this,
+                commandType = "CREDIT_CHECK",
+                payload = payload,
+                onSuccess = { resp ->
+                    runOnUiThread {
+                        Toast.makeText(this, "Credit check queued. Ref: ${resp.correlationId}", Toast.LENGTH_LONG).show()
+                    }
+                    watchCreditCheckCompletion(resp.correlationId)
+                },
+                onError = { err ->
+                    runOnUiThread {
+                        Toast.makeText(this, "Credit check failed: $err", Toast.LENGTH_LONG).show()
+                    }
+                }
+            )
+        }
+
+        findViewById<MaterialButton>(R.id.btnStartTestDrive).setOnClickListener {
+            val leadCorrelationId = WorkflowState.getLeadCorrelationId(this)
+            if (leadCorrelationId.isNullOrBlank()) {
+                Toast.makeText(this, "Create lead first", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            val vehicleRef = findViewById<EditText>(R.id.etTestDriveVehicleRef).text?.toString().orEmpty().trim()
+            if (vehicleRef.isBlank()) {
+                Toast.makeText(this, "Enter vehicle ref", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            val cellphone = findViewById<EditText>(R.id.etLeadCellphone).text?.toString().orEmpty().trim().replace(" ", "")
+            if (cellphone.length < 10) {
+                Toast.makeText(this, getString(R.string.lead_cellphone_required), Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            val emergency = findViewById<EditText>(R.id.etTestDriveEmergencyMobile).text?.toString().orEmpty().trim()
+            val returnMinutes = findViewById<EditText>(R.id.etPlannedReturnMinutes).text?.toString().orEmpty().trim().toIntOrNull() ?: 30
+            val cal = Calendar.getInstance()
+            cal.add(Calendar.MINUTE, returnMinutes.coerceIn(5, 180))
+            val payload = JSONObject().apply {
+                put("leadId", leadCorrelationId)
+                put("vehicleRef", vehicleRef)
+                put("driverIdNumber", idNumber)
+                put("mobile", cellphone)
+                put("emergencyMobile", emergency)
+                put("plannedReturnAt", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                }.format(cal.time))
+            }
+            CommandApiService.startTestDrive(
+                context = this,
+                payload = payload,
+                onSuccess = { json ->
+                    val session = json.optJSONObject("session")
+                    activeTestDriveSessionId = session?.optString("sessionId").orEmpty().ifBlank { null }
+                    runOnUiThread {
+                        findViewById<TextView>(R.id.tvTestDriveStatus).text =
+                            "Active session: ${activeTestDriveSessionId ?: "-"}"
+                        Toast.makeText(this, "Test drive started", Toast.LENGTH_LONG).show()
+                    }
+                    refreshActiveTestDriveStatus()
+                },
+                onError = { err ->
+                    runOnUiThread { Toast.makeText(this, "Start test drive failed: $err", Toast.LENGTH_LONG).show() }
+                }
+            )
+        }
+
+        findViewById<MaterialButton>(R.id.btnTestDriveCheckin).setOnClickListener {
+            val sessionId = activeTestDriveSessionId
+            if (sessionId.isNullOrBlank()) {
+                Toast.makeText(this, "Start a test drive first", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            CommandApiService.testDriveCheckin(
+                context = this,
+                sessionId = sessionId,
+                payload = JSONObject().apply { put("note", "Salesman safety check-in") },
+                onSuccess = {
+                    runOnUiThread { Toast.makeText(this, "Check-in captured", Toast.LENGTH_SHORT).show() }
+                    refreshActiveTestDriveStatus()
+                },
+                onError = { err ->
+                    runOnUiThread { Toast.makeText(this, "Check-in failed: $err", Toast.LENGTH_LONG).show() }
+                }
+            )
+        }
+
+        findViewById<MaterialButton>(R.id.btnCompleteTestDrive).setOnClickListener {
+            val sessionId = activeTestDriveSessionId
+            if (sessionId.isNullOrBlank()) {
+                Toast.makeText(this, "No active test drive", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            CommandApiService.completeTestDrive(
+                context = this,
+                sessionId = sessionId,
+                payload = JSONObject().apply { put("returnNotes", "Vehicle returned safely") },
+                onSuccess = {
+                    activeTestDriveSessionId = null
+                    runOnUiThread {
+                        findViewById<TextView>(R.id.tvTestDriveStatus).text = getString(R.string.test_drive_status_placeholder)
+                        Toast.makeText(this, "Test drive completed", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                onError = { err ->
+                    runOnUiThread { Toast.makeText(this, "Complete failed: $err", Toast.LENGTH_LONG).show() }
+                }
+            )
+        }
+
         findViewById<MaterialButton>(R.id.btnShareStockUnit).setOnClickListener {
             val leadCorrelationId = WorkflowState.getLeadCorrelationId(this)
             if (leadCorrelationId.isNullOrBlank()) {
@@ -285,6 +436,38 @@ class LicenseResultActivity : AppCompatActivity() {
             loadAndPickStock(forceRefresh = true, search = q, openPicker = false)
         }
         loadAndPickStock(forceRefresh = false, search = "", openPicker = false)
+        refreshActiveTestDriveStatus()
+    }
+
+    private fun refreshActiveTestDriveStatus() {
+        CommandApiService.getActiveTestDrives(
+            context = this,
+            onSuccess = { json ->
+                val arr = json.optJSONArray("sessions")
+                var statusText = getString(R.string.test_drive_status_placeholder)
+                if (arr != null && arr.length() > 0) {
+                    val first = arr.optJSONObject(0)
+                    val sid = first?.optString("sessionId").orEmpty()
+                    val safety = first?.optString("safetyStatus").orEmpty().ifBlank { "on_track" }
+                    val overdue = first?.optInt("overdueMinutes", 0) ?: 0
+                    if (sid.isNotBlank()) activeTestDriveSessionId = sid
+                    statusText = if (overdue > 0) {
+                        "Safety alert: $safety ($overdue min overdue)"
+                    } else {
+                        "Active test drive: $safety"
+                    }
+                }
+                runOnUiThread {
+                    val view = findViewById<TextView>(R.id.tvTestDriveStatus)
+                    view.text = statusText
+                    val danger = statusText.contains("overdue", ignoreCase = true)
+                    view.setTextColor(if (danger) Color.parseColor("#B3261E") else ContextCompat.getColor(this, R.color.text_secondary))
+                }
+            },
+            onError = { err ->
+                runOnUiThread { findViewById<TextView>(R.id.tvTestDriveStatus).text = "Test drive status unavailable: $err" }
+            }
+        )
     }
 
     private fun watchLeadCommandCompletion(correlationId: String) {
@@ -318,6 +501,44 @@ class LicenseResultActivity : AppCompatActivity() {
                     }
                 } catch (_: Exception) {
                     // Keep polling; connector may still be processing.
+                }
+            }
+        }.start()
+    }
+
+    private fun watchCreditCheckCompletion(correlationId: String) {
+        Thread {
+            repeat(10) {
+                try {
+                    Thread.sleep(1500)
+                    val status = CommandApiService.getCommandStatusBlocking(this, correlationId)
+                    val s = status.status.lowercase()
+                    if (s == "done") {
+                        val cc = status.result?.optJSONObject("creditCheck")
+                        val score = cc?.optInt("score")
+                        val band = cc?.optString("band").orEmpty()
+                        val decision = cc?.optString("decision").orEmpty()
+                        runOnUiThread {
+                            val text = if (score != null && score >= 0) {
+                                "Quick score: $score (${band.ifBlank { "unknown" }}) • decision: ${decision.ifBlank { "review" }}"
+                            } else {
+                                "Credit check completed"
+                            }
+                            findViewById<TextView>(R.id.tvCreditCheckResult).text = text
+                            Toast.makeText(this, text, Toast.LENGTH_LONG).show()
+                        }
+                        return@Thread
+                    }
+                    if (s == "failed") {
+                        runOnUiThread {
+                            val msg = "Credit check failed: ${status.error ?: "Unknown error"}"
+                            findViewById<TextView>(R.id.tvCreditCheckResult).text = msg
+                            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                        }
+                        return@Thread
+                    }
+                } catch (_: Exception) {
+                    // keep polling
                 }
             }
         }.start()

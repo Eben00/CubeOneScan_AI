@@ -99,6 +99,11 @@
             android:exported="false"
             android:theme="@style/Theme.CubeOneScan" />
 
+        <activity
+            android:name=".ui.OperationsDashboardActivity"
+            android:exported="false"
+            android:theme="@style/Theme.CubeOneScan" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

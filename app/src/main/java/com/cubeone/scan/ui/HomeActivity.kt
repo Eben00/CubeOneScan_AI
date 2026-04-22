@@ -48,6 +48,7 @@ class HomeActivity : AppCompatActivity() {
         val canAccessApprovals = role == "dealer_principal" || role == "sales_manager"
         val canAccessAudit = role == "dealer_principal" || role == "sales_manager" || role == "sales_person"
         val canShareWorkflows = role == "dealer_principal" || role == "sales_manager" || role == "sales_person"
+        val canAccessOpsDashboard = role == "dealer_principal" || role == "sales_manager" || role == "sales_person"
 
         fun openScanner(mode: String, postAction: String = ScannerActivity.ACTION_NONE) {
             val intent = Intent(this, ScannerActivity::class.java).apply {
@@ -134,6 +135,15 @@ class HomeActivity : AppCompatActivity() {
             }
         } else {
             btnAuditEvents.visibility = android.view.View.GONE
+        }
+        val btnOperationsDashboard = findViewById<MaterialButton>(R.id.btnOperationsDashboard)
+        if (canAccessOpsDashboard) {
+            btnOperationsDashboard.visibility = android.view.View.VISIBLE
+            btnOperationsDashboard.setOnClickListener {
+                startActivity(Intent(this, OperationsDashboardActivity::class.java))
+            }
+        } else {
+            btnOperationsDashboard.visibility = android.view.View.GONE
         }
         val btnLogoutAll = findViewById<MaterialButton>(R.id.btnLogoutAll)
         btnLogoutAll.setOnClickListener {

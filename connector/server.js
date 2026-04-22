@@ -4,6 +4,7 @@ const express = require("express");
 const { v4: uuidv4 } = require("uuid");
 const fs = require("fs");
 const path = require("path");
+const { createEvolvesaProvider } = require("./providers/evolvesa");
 let jwt = null;
 try {
   jwt = require("jsonwebtoken");
@@ -121,6 +122,8 @@ const EVOLVESA_STOCK_SOURCE = (process.env.EVOLVESA_STOCK_SOURCE || "CubeOneScan
 const EVOLVESA_STOCK_SOURCE_ID = (process.env.EVOLVESA_STOCK_SOURCE_ID || "").trim();
 const EVOLVESA_DEFAULT_LEAD_ANCILLARY_AREA = (process.env.EVOLVESA_DEFAULT_LEAD_ANCILLARY_AREA || "Gauteng").trim();
 const EVOLVESA_DEFAULT_LEAD_USER_AREA = (process.env.EVOLVESA_DEFAULT_LEAD_USER_AREA || "JHB").trim();
+const DEFAULT_CRM_PROVIDER = (process.env.DEFAULT_CRM_PROVIDER || "evolvesa").trim().toLowerCase();
+const CRM_PROVIDER_BY_DEALER_RAW = (process.env.CRM_PROVIDER_BY_DEALER || "").trim();
 const AUTOTRADER_LISTINGS_URL = (
   process.env.AUTOTRADER_LISTINGS_URL ||
   "https://services.autotrader.co.za/api/syndication/v1.0/listings"
@@ -144,9 +147,24 @@ const ENFORCE_TENANT_RINGFENCE = String(process.env.ENFORCE_TENANT_RINGFENCE || 
 const AUTH_JWT_SECRET = (process.env.AUTH_JWT_SECRET || "").trim();
 const COMMAND_MAX_RETRIES = Number(process.env.COMMAND_MAX_RETRIES || 3);
 const COMMAND_RETRY_DELAY_MS = Number(process.env.COMMAND_RETRY_DELAY_MS || 1200);
+const CREDIT_CHECK_MODE = String(process.env.CREDIT_CHECK_MODE || "stub").trim().toLowerCase();
 const CONNECTOR_DATA_DIR = process.env.CONNECTOR_DATA_DIR || path.join(__dirname, "data");
 const TENANT_ADMIN_TOKEN = String(process.env.TENANT_ADMIN_TOKEN || "").trim();
 const TENANT_CONFIG_RUNTIME_FILE = path.join(CONNECTOR_DATA_DIR, "tenant-config.runtime.json");
+const TENANT_CONFIG_HISTORY_FILE = path.join(CONNECTOR_DATA_DIR, "tenant-config.history.json");
+const TENANT_CONFIG_PROPOSALS_FILE = path.join(CONNECTOR_DATA_DIR, "tenant-config.proposals.json");
+const TENANT_ADMIN_EDITOR_ROLES = new Set(
+  String(process.env.TENANT_ADMIN_EDITOR_ROLES || "dealer_principal,tenant_admin_editor")
+    .split(",")
+    .map((x) => String(x || "").trim().toLowerCase())
+    .filter(Boolean)
+);
+const TENANT_ADMIN_APPROVER_ROLES = new Set(
+  String(process.env.TENANT_ADMIN_APPROVER_ROLES || "dealer_principal,tenant_admin_approver")
+    .split(",")
+    .map((x) => String(x || "").trim().toLowerCase())
+    .filter(Boolean)
+);
 const STORE_FILE = path.join(CONNECTOR_DATA_DIR, "commands-store.json");
 const AUTOTRADER_CACHE_FILE = path.join(CONNECTOR_DATA_DIR, "autotrader-stock-cache.json");
 const VMG_CACHE_FILE = path.join(CONNECTOR_DATA_DIR, "vmg-stock-cache.json");
@@ -260,6 +278,9 @@ function requireAuth(req, res, next) {
 function canonicalDealerId(value) {
   const raw = normalizeDealerToken(value);
   if (!raw) return "";
+  // Purely numeric ids are canonical tenant/CRM ids (e.g. 1257, 510). Do not apply DEALER_ID_ALIASES
+  // to them: comma-map entries like 510=208 are for stock-feed matching, not Evolve did= / ring-fence.
+  if (/^\d+$/.test(raw)) return raw;
   const aliased = DEALER_ID_ALIASES.get(raw);
   return String(aliased || raw).trim();
 }
@@ -325,6 +346,7 @@ const VALUATION_COMMAND = "MARKET_VALUE_REPORT";
 const LEGACY_VALUATION_COMMANDS = new Set(["TRUTRADE_REPORT", "VALUATION_REPORT"]);
 const SUBMITTABLE_COMMANDS = new Set([
   "CREATE_LEAD",
+  "CREDIT_CHECK",
   "SHARE_LEAD",
   VALUATION_COMMAND,
   "CREATE_STOCK_UNIT",
@@ -352,6 +374,7 @@ function canSubmitCommand(role, commandType) {
   if (r === "sales_manager") {
     return [
       "CREATE_LEAD",
+      "CREDIT_CHECK",
       "SHARE_LEAD",
       VALUATION_COMMAND,
       "CREATE_STOCK_UNIT",
@@ -363,6 +386,7 @@ function canSubmitCommand(role, commandType) {
   // sales_person
   return [
     "CREATE_LEAD",
+    "CREDIT_CHECK",
     "SHARE_LEAD",
     VALUATION_COMMAND,
     "CREATE_STOCK_UNIT",
@@ -390,6 +414,9 @@ const commands = new Map(); // correlationId -> { status, createdAt, commandType
 const idempotencyIndex = new Map(); // idempotencyKey -> correlationId
 const deadLetters = [];
 const stockTakeSessions = new Map(); // sessionId -> hybrid stock take basket
+const targetPlans = new Map(); // tenantKey( dealer|branch|period ) -> target plan
+const alertRules = new Map(); // ruleId -> alert rule
+const testDriveSessions = new Map(); // sessionId -> test-drive safety sessions
 const autoTraderListingsCache = {
   fetchedAtMs: 0,
   rows: [],
@@ -588,6 +615,9 @@ function persistStore() {
     idempotencyIndex: Object.fromEntries(idempotencyIndex.entries()),
     deadLetters,
     stockTakeSessions: Array.from(stockTakeSessions.values()),
+    targetPlans: Array.from(targetPlans.values()),
+    alertRules: Array.from(alertRules.values()),
+    testDriveSessions: Array.from(testDriveSessions.values()),
   };
   fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2), "utf8");
 }
@@ -613,6 +643,20 @@ function loadStore() {
     if (s?.sessionId) {
       stockTakeSessions.set(String(s.sessionId), s);
     }
+  }
+  for (const t of parsed.targetPlans || []) {
+    const dealerId = String(t?.dealerId || "").trim();
+    const period = String(t?.period || "").trim();
+    if (!dealerId || !period) continue;
+    const branchId = String(t?.branchId || "").trim();
+    const key = `${dealerId}|${branchId}|${period}`;
+    targetPlans.set(key, t);
+  }
+  for (const r of parsed.alertRules || []) {
+    if (r?.ruleId) alertRules.set(String(r.ruleId), r);
+  }
+  for (const td of parsed.testDriveSessions || []) {
+    if (td?.sessionId) testDriveSessions.set(String(td.sessionId), td);
   }
 }
 
@@ -655,6 +699,31 @@ function validateCommandPayload(commandType, payload) {
         return {
           error: "invalid_payload",
           hint: "CREATE_LEAD payload requires payload.driverLicense or payload.lead with first/last name fields.",
+        };
+      }
+      return null;
+    }
+    case "CREDIT_CHECK": {
+      const consent = payload?.consent;
+      if (!consent || consent.accepted !== true) {
+        return {
+          error: "invalid_payload",
+          hint: "CREDIT_CHECK requires payload.consent.accepted=true before running soft check.",
+        };
+      }
+      const applicant = payload.applicant || {};
+      const idNumber = String(applicant.idNumber || payload.idNumber || "").trim();
+      const mobile = String(applicant.mobile || applicant.contact || payload.phone || "").trim();
+      if (!idNumber || !mobile) {
+        return {
+          error: "invalid_payload",
+          hint: "CREDIT_CHECK requires applicant idNumber and mobile/contact.",
+        };
+      }
+      if (!payload.leadId && !payload.leadCorrelationId) {
+        return {
+          error: "invalid_payload",
+          hint: "CREDIT_CHECK requires leadId or leadCorrelationId (create lead first).",
         };
       }
       return null;
@@ -785,6 +854,96 @@ function canAccessTenantScopedRecord(recordTenant = {}, requestTenant = {}) {
   return recordBranch === requestBranch;
 }
 
+function toIsoDate(value) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+function monthPeriod(value = new Date()) {
+  const d = new Date(value);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+function tenantKey(dealerId, branchId = "", period = monthPeriod()) {
+  return `${String(dealerId || "").trim()}|${String(branchId || "").trim()}|${String(period || "").trim()}`;
+}
+
+function computeBandLabel(value, target) {
+  const v = Number(value || 0);
+  const t = Number(target || 0);
+  if (!Number.isFinite(t) || t <= 0) return "no_target";
+  const ratio = v / t;
+  if (ratio >= 1) return "on_track";
+  if (ratio >= 0.8) return "at_risk";
+  return "off_track";
+}
+
+function commandsInWindow(fromIso, toIso) {
+  const fromMs = fromIso ? Date.parse(fromIso) : Number.NEGATIVE_INFINITY;
+  const toMs = toIso ? Date.parse(toIso) : Number.POSITIVE_INFINITY;
+  const rows = [];
+  for (const c of commands.values()) {
+    const ts = Date.parse(c?.createdAt || 0);
+    if (!Number.isFinite(ts)) continue;
+    if (ts < fromMs || ts > toMs) continue;
+    rows.push(c);
+  }
+  return rows;
+}
+
+function aggregateKpis(rows = [], dealerId = "", branchId = "") {
+  const matchesTenant = (c) => {
+    const d = String(c?.tenantContext?.dealerId || "").trim();
+    const b = String(c?.tenantContext?.branchId || "").trim();
+    if (dealerId && d !== dealerId) return false;
+    if (branchId && b !== branchId) return false;
+    return true;
+  };
+  const inTenant = rows.filter(matchesTenant);
+  const done = inTenant.filter((c) => c.status === "done");
+  const failed = inTenant.filter((c) => c.status === "failed");
+  const createdLeads = done.filter((c) => c.commandType === "CREATE_LEAD").length;
+  const creditChecks = done.filter((c) => c.commandType === "CREDIT_CHECK").length;
+  const stockUnits = done.filter((c) => c.commandType === "CREATE_STOCK_UNIT").length;
+  const sharedStock = done.filter((c) => c.commandType === "SEND_STOCK_TO_LEAD").length;
+  const approvalsPending = inTenant.filter((c) => c.status === "pending_manager_approval").length;
+  const avgProcessMs = (() => {
+    const samples = done
+      .map((c) => {
+        const a = Date.parse(c?.createdAt || 0);
+        const b = Date.parse(c?.updatedAt || 0);
+        if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return null;
+        return b - a;
+      })
+      .filter((x) => Number.isFinite(x));
+    if (samples.length === 0) return null;
+    return Math.round(samples.reduce((acc, x) => acc + x, 0) / samples.length);
+  })();
+  return {
+    totalCommands: inTenant.length,
+    done: done.length,
+    failed: failed.length,
+    createdLeads,
+    creditChecks,
+    stockUnits,
+    sharedStock,
+    approvalsPending,
+    avgProcessMs,
+    leadToStockUnitRate: createdLeads > 0 ? Number((stockUnits / createdLeads).toFixed(3)) : null,
+    leadToShareRate: createdLeads > 0 ? Number((sharedStock / createdLeads).toFixed(3)) : null,
+  };
+}
+
+function rollingForecast(currentValue, elapsedDays, windowDays = 30) {
+  const v = Number(currentValue || 0);
+  const e = Number(elapsedDays || 0);
+  if (!Number.isFinite(v) || !Number.isFinite(e) || e <= 0) return null;
+  return Math.round((v / e) * windowDays);
+}
+
 function buildStockTakeItemFromStock(stock, source, extra = {}) {
   return {
     itemId: `stkitem_${uuidv4()}`,
@@ -903,16 +1062,6 @@ function toEvolveStockPayload(payload) {
   };
 }
 
-function formatEvolvesaLocalDateTime(d) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const HH = String(d.getHours()).padStart(2, "0");
-  const MM = String(d.getMinutes()).padStart(2, "0");
-  const SS = String(d.getSeconds()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd} ${HH}:${MM}:${SS}`;
-}
-
 function redactEvolveTriggerUrl(url) {
   const raw = String(url || "").trim();
   if (!raw) return raw;
@@ -945,401 +1094,51 @@ function parseKeyValueMap(raw) {
 
 let EVOLVESA_LEAD_RECEIVING_ENTITY_MAP = parseKeyValueMap(EVOLVESA_LEAD_RECEIVING_ENTITY_MAP_RAW);
 let EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER = parseKeyValueMap(EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER_RAW);
+let CRM_PROVIDER_BY_DEALER = parseKeyValueMap(CRM_PROVIDER_BY_DEALER_RAW);
+let CRM_PROVIDER_REGISTRY = {};
 
-function resolveLeadReceivingEntity(tenantDealerId) {
-  const dealerId = resolveEvolveDealerId(tenantDealerId);
-  const mapped = dealerId ? EVOLVESA_LEAD_RECEIVING_ENTITY_MAP.get(dealerId) : null;
-  if (mapped) {
-    const sep = mapped.indexOf("|");
-    if (sep > 0) {
-      return {
-        id: mapped.slice(0, sep).trim() || dealerId,
-        name: mapped.slice(sep + 1).trim() || `Dealer ${dealerId}`,
-      };
-    }
-    return { id: mapped, name: `Dealer ${mapped}` };
-  }
-  return {
-    id: EVOLVESA_LEAD_RECEIVING_ENTITY_ID,
-    name: EVOLVESA_LEAD_RECEIVING_ENTITY_NAME,
+function buildCrmProviderRegistry() {
+  CRM_PROVIDER_REGISTRY = {
+    evolvesa: createEvolvesaProvider({
+      fetchImpl: fetch,
+      uuidv4,
+      log,
+      canonicalDealerId,
+      evolveAuthHeaderValue,
+      evolveConfigured,
+      toEvolveLeadPayload,
+      toEvolveStockPayload,
+      redactEvolveTriggerUrl,
+      config: {
+        baseUrl: EVOLVESA_BASE_URL,
+        timeoutMs: EVOLVESA_TIMEOUT_MS,
+        stockEndpoint: EVOLVESA_STOCK_ENDPOINT,
+        stockTriggerUrl: EVOLVESA_STOCK_TRIGGER_URL,
+        leadTriggerUrl: EVOLVESA_LEAD_TRIGGER_URL,
+        leadReceivingEntityId: EVOLVESA_LEAD_RECEIVING_ENTITY_ID,
+        leadReceivingEntityName: EVOLVESA_LEAD_RECEIVING_ENTITY_NAME,
+        leadSource: EVOLVESA_LEAD_SOURCE,
+        leadSourceId: EVOLVESA_LEAD_SOURCE_ID,
+        stockSourceId: EVOLVESA_STOCK_SOURCE_ID,
+        defaultLeadAncillaryArea: EVOLVESA_DEFAULT_LEAD_ANCILLARY_AREA,
+        defaultLeadUserArea: EVOLVESA_DEFAULT_LEAD_USER_AREA,
+      },
+      maps: {
+        leadReceivingEntityMap: EVOLVESA_LEAD_RECEIVING_ENTITY_MAP,
+        leadTriggerUrlByDealer: EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER,
+      },
+    }),
   };
 }
 
-function resolveEvolveDealerId(tenantDealerId) {
-  const raw = normalizeDealerToken(tenantDealerId);
-  if (!raw) return "";
-  const aliased = DEALER_ID_ALIASES.get(raw);
-  return String(aliased || raw).trim();
+function resolveCrmProvider(tenantContext = {}) {
+  const dealerId = canonicalDealerId(tenantContext?.dealerId);
+  const dealerPreferred = dealerId ? String(CRM_PROVIDER_BY_DEALER.get(dealerId) || "").trim().toLowerCase() : "";
+  const wanted = dealerPreferred || DEFAULT_CRM_PROVIDER;
+  return CRM_PROVIDER_REGISTRY[wanted] || CRM_PROVIDER_REGISTRY.evolvesa;
 }
 
-function resolveLeadTriggerUrl(tenantDealerId) {
-  const dealerId = resolveEvolveDealerId(tenantDealerId);
-  if (dealerId && EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER.has(dealerId)) {
-    return EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER.get(dealerId);
-  }
-  if (!EVOLVESA_LEAD_TRIGGER_URL) return "";
-  try {
-    const u = new URL(EVOLVESA_LEAD_TRIGGER_URL);
-    if (dealerId && u.searchParams.has("did")) {
-      u.searchParams.set("did", dealerId);
-      return u.toString();
-    }
-  } catch (_) {
-    // Keep original URL when parsing fails.
-  }
-  return EVOLVESA_LEAD_TRIGGER_URL;
-}
-
-async function evolvesaTriggerCreateLead(payload) {
-  const tenant = payload?._tenantContext || {};
-  const resolvedTriggerUrl = resolveLeadTriggerUrl(tenant?.dealerId);
-  if (!resolvedTriggerUrl) {
-    throw new Error("EVOLVESA_LEAD_TRIGGER_URL not configured");
-  }
-
-  const dl = payload?.driverLicense || payload?.lead || {};
-  const receivingEntity = resolveLeadReceivingEntity(tenant?.dealerId);
-
-  const ancillaryArea = dl?.area || payload?.area || EVOLVESA_DEFAULT_LEAD_ANCILLARY_AREA;
-  const userArea = payload?.userArea || dl?.userArea || EVOLVESA_DEFAULT_LEAD_USER_AREA;
-  const firstName = dl?.firstName || dl?.NAMES || "";
-  const lastName = dl?.lastName || dl?.SURNAME || dl?.surname || "";
-  const fullName = `${firstName} ${lastName}`.trim() || dl?.name || payload?.name || "Customer";
-
-  const phone = dl?.phone || dl?.mobile || payload?.phone || "";
-  const email = dl?.email || payload?.email || "";
-  const idNumber = dl?.idNumber || dl?.ID_NUMBER || payload?.idNumber || "";
-  const createdByName = tenant?.userName || "";
-  const createdByEmail = tenant?.userEmail || "";
-  const createdByUserId = tenant?.userId || "";
-  const createdByRole = tenant?.role || "";
-  const assignedTo = createdByEmail || createdByName || createdByUserId;
-
-  // “created/lead-reference” + “receiving-entity” are required by the trigger payload structure.
-  const leadReference = dl?.idNumber || dl?.LICENSE_NUMBER || dl?.licenseNumber || `lead_${uuidv4()}`;
-  const created = formatEvolvesaLocalDateTime(new Date());
-
-  // Minimal “ancillary-data” keeping payload shape, but excluding vehicle detail as requested.
-  const requestBody = {
-    "ancillary-data": {
-      area: ancillaryArea,
-      type: "stock",
-      source: EVOLVESA_LEAD_SOURCE,
-      ...(EVOLVESA_LEAD_SOURCE_ID ? { "source-id": EVOLVESA_LEAD_SOURCE_ID } : {}),
-      ...(idNumber ? { "id-number": String(idNumber) } : {}),
-      ...(createdByUserId ? { "created-by-user-id": String(createdByUserId) } : {}),
-      ...(createdByName ? { "created-by-name": String(createdByName) } : {}),
-      ...(createdByEmail ? { "created-by-email": String(createdByEmail) } : {}),
-      ...(createdByRole ? { "created-by-role": String(createdByRole) } : {}),
-      ...(createdByUserId ? { "assigned-to-user-id": String(createdByUserId) } : {}),
-      ...(createdByName ? { "assigned-to-name": String(createdByName) } : {}),
-      ...(createdByEmail ? { "assigned-to-email": String(createdByEmail) } : {}),
-      ...(assignedTo ? { "assigned-to": String(assignedTo) } : {}),
-    },
-    created,
-    "lead-reference": String(leadReference),
-    // Some EvolveSA environments expect lead-source on the lead itself, others in ancillary-data.
-    ...(EVOLVESA_LEAD_SOURCE ? { "lead-source": EVOLVESA_LEAD_SOURCE } : {}),
-    ...(EVOLVESA_LEAD_SOURCE_ID ? { "lead-source-id": EVOLVESA_LEAD_SOURCE_ID } : {}),
-    "receiving-entity": {
-      id: receivingEntity.id,
-      name: receivingEntity.name,
-    },
-    "user-data": {
-      area: userArea,
-      email,
-      ...(EVOLVESA_LEAD_SOURCE ? { source: EVOLVESA_LEAD_SOURCE } : {}),
-      ...(EVOLVESA_LEAD_SOURCE_ID ? { "source-id": EVOLVESA_LEAD_SOURCE_ID } : {}),
-      message:
-        dl?.message ||
-        payload?.message ||
-        `Lead created from ${EVOLVESA_LEAD_SOURCE}. Dealer=${tenant?.dealerId || ""} Branch=${tenant?.branchId || ""}${idNumber ? ` ID=${idNumber}` : ""}`,
-      "mobile-number": phone,
-      name: fullName,
-      ...(createdByUserId ? { "assigned-to-user-id": String(createdByUserId) } : {}),
-      ...(createdByName ? { "assigned-to-name": String(createdByName) } : {}),
-      ...(createdByEmail ? { "assigned-to-email": String(createdByEmail) } : {}),
-      ...(assignedTo ? { "assigned-to": String(assignedTo) } : {}),
-      // Duplicate ID number here so Deal Builder / credit tab can bind it directly.
-      ...(idNumber ? { "id-number": String(idNumber) } : {}),
-    },
-  };
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), EVOLVESA_TIMEOUT_MS);
-  try {
-    const headers = {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    };
-    const authHeaderValue = evolveAuthHeaderValue();
-    if (authHeaderValue) {
-      headers.Authorization = authHeaderValue;
-    }
-
-    const response = await fetch(resolvedTriggerUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(requestBody),
-      signal: controller.signal,
-    });
-
-    const text = await response.text();
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch (_) {
-      json = null;
-    }
-
-    if (!response.ok) {
-      const preview = text && text.length > 700 ? `${text.slice(0, 700)}…` : text;
-      throw new Error(`EvolveSA lead trigger HTTP ${response.status}${preview ? `: ${preview}` : ""}`);
-    }
-
-    // Some trigger flows return HTTP 200 with an application-level error payload.
-    // Treat these as failures so command status reflects the true outcome.
-    const payloadStatus = Number(json?.status);
-    const payloadCode = String(json?.code || "").trim();
-    const payloadName = String(json?.name || "").trim();
-    const hasPayloadError =
-      (Number.isFinite(payloadStatus) && payloadStatus >= 400) ||
-      payloadCode.toUpperCase() === "INVALID_FOREIGN_KEY" ||
-      payloadName.toLowerCase().includes("error");
-    if (hasPayloadError) {
-      const preview = text && text.length > 700 ? `${text.slice(0, 700)}…` : text;
-      throw new Error(`EvolveSA lead trigger payload error${preview ? `: ${preview}` : ""}`);
-    }
-
-    // Trigger responses vary; try several shapes.
-    let leadId = null;
-    if (typeof json === "number") leadId = String(json);
-    if (Array.isArray(json) && json.length > 0) {
-      const first = json[0];
-      leadId =
-        (typeof first === "number" && String(first)) ||
-        first?.leadId ||
-        first?.id ||
-        null;
-    }
-    if (!leadId && json && typeof json === "object") {
-      leadId = json.leadId || json.id || json.reference || null;
-    }
-
-    const resolvedLeadId = leadId || `lead_${uuidv4()}`;
-    const responsePreview = text
-      ? (text.length > 2000 ? `${text.slice(0, 2000)}…` : text)
-      : "";
-
-    log("info", "evolvesa_lead_trigger_ok", {
-      httpStatus: response.status,
-      leadId: resolvedLeadId,
-      dealerId: resolveEvolveDealerId(tenant?.dealerId),
-      triggerUrl: redactEvolveTriggerUrl(resolvedTriggerUrl),
-      responseType: json == null ? "empty" : Array.isArray(json) ? "array" : typeof json,
-      rawResponsePreview: responsePreview,
-    });
-
-    return {
-      mode: "live",
-      provider: "EvolveSA",
-      leadId: resolvedLeadId,
-      rawRef: json?.reference || json?.ref || null,
-      debug: {
-        mode: "trigger",
-        request: {
-          url: redactEvolveTriggerUrl(resolvedTriggerUrl),
-          body: requestBody,
-        },
-        response: {
-          status: response.status,
-          bodyText: text,
-          bodyJson: json,
-        },
-      },
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function evolvesaCreateLead(payload) {
-  if (!EVOLVESA_LEAD_TRIGGER_URL && !evolveConfigured()) {
-    throw new Error(
-      "EvolveSA lead integration not configured. Set EVOLVESA_BASE_URL and EVOLVESA_API_KEY (or EVOLVESA_LEAD_TRIGGER_URL) in connector .env."
-    );
-  }
-
-  // Prefer the trigger URL mapping if configured (matches the Cars.co.za → EvolveSA flow you shared).
-  if (EVOLVESA_LEAD_TRIGGER_URL) {
-    try {
-      return await evolvesaTriggerCreateLead(payload);
-    } catch (e) {
-      throw e;
-    }
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), EVOLVESA_TIMEOUT_MS);
-  try {
-    const body = toEvolveLeadPayload(payload);
-    const response = await fetch(`${EVOLVESA_BASE_URL}/api/v1/leads`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": evolveAuthHeaderValue(),
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch (_) {
-      json = null;
-    }
-    if (!response.ok) {
-      const preview = text && text.length > 600 ? `${text.slice(0, 600)}…` : text;
-      throw new Error(`EvolveSA HTTP ${response.status}${preview ? `: ${preview}` : ""}`);
-    }
-
-    return {
-      mode: "live",
-      leadId: json?.leadId || json?.id || `lead_${uuidv4()}`,
-      provider: "EvolveSA",
-      rawRef: json?.reference || json?.ref || null,
-      debug: {
-        mode: "api",
-        request: {
-          url: `${EVOLVESA_BASE_URL}/api/v1/leads`,
-          body,
-        },
-        response: {
-          status: response.status,
-          bodyText: text,
-          bodyJson: json,
-        },
-      },
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function evolvesaCreateStockUnit(payload) {
-  if (EVOLVESA_STOCK_TRIGGER_URL) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), EVOLVESA_TIMEOUT_MS);
-    try {
-      const body = toEvolveStockPayload(payload);
-      const headers = {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      };
-      const authHeaderValue = evolveAuthHeaderValue();
-      if (authHeaderValue) {
-        headers.Authorization = authHeaderValue;
-      }
-      const response = await fetch(EVOLVESA_STOCK_TRIGGER_URL, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      const text = await response.text();
-      let json = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch (_) {
-        json = null;
-      }
-      if (!response.ok) {
-        const preview = text && text.length > 600 ? `${text.slice(0, 600)}…` : text;
-        throw new Error(`EvolveSA stock trigger HTTP ${response.status}${preview ? `: ${preview}` : ""}`);
-      }
-      return {
-        mode: "live",
-        provider: "EvolveSA",
-        stockUnitId: json?.stockUnitId || json?.id || `stock_${uuidv4()}`,
-        rawRef: json?.reference || json?.ref || null,
-        debug: {
-          mode: "trigger",
-          request: {
-            url: redactEvolveTriggerUrl(EVOLVESA_STOCK_TRIGGER_URL),
-            body,
-          },
-          response: {
-            status: response.status,
-            bodyText: text,
-            bodyJson: json,
-          },
-        },
-      };
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  if (!evolveConfigured()) {
-    return {
-      mode: "stub",
-      stockUnitId: `stock_${uuidv4()}`,
-      warning:
-        "EvolveSA stock integration not configured. Set EVOLVESA_STOCK_TRIGGER_URL or EVOLVESA_BASE_URL + EVOLVESA_API_KEY in connector .env.",
-      stock: toEvolveStockPayload(payload),
-    };
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), EVOLVESA_TIMEOUT_MS);
-  try {
-    const body = toEvolveStockPayload(payload);
-    const endpoint = EVOLVESA_STOCK_ENDPOINT.startsWith("/") ? EVOLVESA_STOCK_ENDPOINT : `/${EVOLVESA_STOCK_ENDPOINT}`;
-    const response = await fetch(`${EVOLVESA_BASE_URL}${endpoint}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": evolveAuthHeaderValue(),
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch (_) {
-      json = null;
-    }
-    if (!response.ok) {
-      const preview = text && text.length > 600 ? `${text.slice(0, 600)}…` : text;
-      throw new Error(`EvolveSA stock HTTP ${response.status}${preview ? `: ${preview}` : ""}`);
-    }
-    return {
-      mode: "live",
-      provider: "EvolveSA",
-      stockUnitId: json?.stockUnitId || json?.id || `stock_${uuidv4()}`,
-      rawRef: json?.reference || json?.ref || null,
-      debug: {
-        mode: "api",
-        request: {
-          url: `${EVOLVESA_BASE_URL}${endpoint}`,
-          body,
-        },
-        response: {
-          status: response.status,
-          bodyText: text,
-          bodyJson: json,
-        },
-      },
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
+buildCrmProviderRegistry();
 
 async function fetchAutoTraderPhotoForVehicle(vehicle = {}) {
   const authHeader = autoTraderAuthHeaderValue();
@@ -1455,10 +1254,60 @@ function tenantConfigSnapshot() {
     source: TENANT_CONFIG.source,
     dealerAliases: Object.fromEntries(DEALER_ID_ALIASES),
     emailDealerMap: Object.fromEntries(USER_EMAIL_DEALER_MAP),
+    defaultCrmProvider: DEFAULT_CRM_PROVIDER,
+    crmProviderByDealer: Object.fromEntries(CRM_PROVIDER_BY_DEALER),
     vmgDealerScopes: Array.from(VMG_DEALER_SCOPES),
     evolvesaLeadReceivingEntityMap: Object.fromEntries(EVOLVESA_LEAD_RECEIVING_ENTITY_MAP),
     evolvesaLeadTriggerUrlByDealer: Object.fromEntries(EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER),
   };
+}
+
+function readTenantConfigHistory() {
+  try {
+    if (!fs.existsSync(TENANT_CONFIG_HISTORY_FILE)) return [];
+    const parsed = JSON.parse(fs.readFileSync(TENANT_CONFIG_HISTORY_FILE, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function appendTenantConfigHistory(action, payload, req = null) {
+  const history = readTenantConfigHistory();
+  history.push({
+    id: `tconf_${uuidv4()}`,
+    action,
+    at: new Date().toISOString(),
+    actorIp: req?.ip || null,
+    actorUserEmail: String(req?.headers?.["x-user-email"] || "").trim().toLowerCase() || null,
+    payload,
+  });
+  const bounded = history.slice(-200);
+  fs.writeFileSync(TENANT_CONFIG_HISTORY_FILE, JSON.stringify(bounded, null, 2), "utf8");
+  return bounded;
+}
+
+function readTenantConfigProposals() {
+  try {
+    if (!fs.existsSync(TENANT_CONFIG_PROPOSALS_FILE)) return [];
+    const parsed = JSON.parse(fs.readFileSync(TENANT_CONFIG_PROPOSALS_FILE, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function writeTenantConfigProposals(items) {
+  const bounded = Array.isArray(items) ? items.slice(-500) : [];
+  fs.writeFileSync(TENANT_CONFIG_PROPOSALS_FILE, JSON.stringify(bounded, null, 2), "utf8");
+}
+
+function tenantAdminRole(req) {
+  return String(req.headers["x-admin-role"] || req.headers["x-user-role"] || "dealer_principal").trim().toLowerCase();
+}
+
+function tenantAdminEmail(req) {
+  return String(req.headers["x-admin-user-email"] || req.headers["x-user-email"] || "").trim().toLowerCase();
 }
 
 function validateTenantConfigPayload(payload) {
@@ -1484,6 +1333,67 @@ function validateTenantConfigPayload(payload) {
   return null;
 }
 
+function buildTenantConfigPreflightReport(payload) {
+  const issues = [];
+  const warnings = [];
+  const dealerAliases = payload?.dealerAliases && typeof payload.dealerAliases === "object" ? payload.dealerAliases : {};
+  const emailDealerMap = payload?.emailDealerMap && typeof payload.emailDealerMap === "object" ? payload.emailDealerMap : {};
+  const evolvesaEntityMap =
+    payload?.evolvesaLeadReceivingEntityMap && typeof payload.evolvesaLeadReceivingEntityMap === "object"
+      ? payload.evolvesaLeadReceivingEntityMap
+      : {};
+  const evolvesaTriggerMap =
+    payload?.evolvesaLeadTriggerUrlByDealer && typeof payload.evolvesaLeadTriggerUrlByDealer === "object"
+      ? payload.evolvesaLeadTriggerUrlByDealer
+      : {};
+  const vmgScopes = parseTokenSet(normalizeConfigList(payload?.vmgDealerScopes));
+
+  for (const [rawFrom, rawTo] of Object.entries(dealerAliases)) {
+    const from = normalizeDealerToken(rawFrom);
+    const to = normalizeDealerToken(rawTo);
+    if (!from || !to) {
+      issues.push(`dealerAliases has empty key/value pair: "${rawFrom}"="${rawTo}"`);
+      continue;
+    }
+    if (from === to) warnings.push(`dealerAliases contains no-op mapping: ${from}=${to}`);
+  }
+
+  for (const [rawEmail, rawDealer] of Object.entries(emailDealerMap)) {
+    const email = String(rawEmail || "").trim().toLowerCase();
+    const dealer = normalizeDealerToken(rawDealer);
+    if (!email.includes("@")) issues.push(`emailDealerMap has invalid email key: "${rawEmail}"`);
+    if (!dealer) issues.push(`emailDealerMap has empty dealer for "${rawEmail}"`);
+  }
+
+  for (const [dealer, url] of Object.entries(evolvesaTriggerMap)) {
+    const d = normalizeDealerToken(dealer);
+    const u = String(url || "").trim();
+    if (!d) issues.push(`evolvesaLeadTriggerUrlByDealer has invalid dealer key: "${dealer}"`);
+    if (!u.startsWith("http://") && !u.startsWith("https://")) {
+      issues.push(`evolvesaLeadTriggerUrlByDealer "${dealer}" must be absolute URL`);
+    }
+  }
+
+  for (const dealer of vmgScopes) {
+    if (evolvesaEntityMap[dealer] == null) {
+      warnings.push(`vmg dealer scope "${dealer}" has no evolvesaLeadReceivingEntityMap entry`);
+    }
+  }
+
+  return {
+    valid: issues.length === 0,
+    issues,
+    warnings,
+    summary: {
+      dealerAliases: Object.keys(dealerAliases).length,
+      emailDealerMap: Object.keys(emailDealerMap).length,
+      vmgDealerScopes: vmgScopes.size,
+      evolvesaLeadReceivingEntityMap: Object.keys(evolvesaEntityMap).length,
+      evolvesaLeadTriggerUrlByDealer: Object.keys(evolvesaTriggerMap).length,
+    },
+  };
+}
+
 function applyTenantConfigPayload(payload, sourceLabel = "admin_api") {
   const parsed = {
     source: sourceLabel,
@@ -1503,6 +1413,7 @@ function applyTenantConfigPayload(payload, sourceLabel = "admin_api") {
   EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER = parseKeyValueMap(
     parsed.evolvesaLeadTriggerUrlByDealerRaw || EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER_RAW
   );
+  buildCrmProviderRegistry();
 }
 
 function requireTenantAdmin(req, res, next) {
@@ -1516,6 +1427,8 @@ function requireTenantAdmin(req, res, next) {
       return res.status(403).json({ error: "forbidden", hint: "missing_or_invalid_tenant_admin_token" });
     }
   }
+  req.tenantAdminRole = tenantAdminRole(req);
+  req.tenantAdminEmail = tenantAdminEmail(req);
   next();
 }
 
@@ -1906,6 +1819,73 @@ async function processCommand(commandType, payload) {
     if (payload?.stockUnitId) return payload.stockUnitId;
     const stockCmd = getByCorrelation(payload?.stockCorrelationId);
     return stockCmd?.result?.stockUnitId || null;
+  };
+
+  const scoreBandFor = (score) => {
+    const s = Number(score);
+    if (!Number.isFinite(s)) return "unknown";
+    if (s >= 767) return "excellent";
+    if (s >= 681) return "good";
+    if (s >= 614) return "favourable";
+    if (s >= 583) return "average";
+    if (s >= 527) return "below_average";
+    if (s >= 487) return "unfavourable";
+    return "poor";
+  };
+
+  const decisionForBand = (band) => {
+    if (["excellent", "good", "favourable", "average"].includes(band)) return "proceed";
+    if (band === "below_average") return "manager_review";
+    return "decline";
+  };
+
+  const buildCreditQuickRequest = (payload, leadId) => {
+    const applicant = payload?.applicant || {};
+    return {
+      name: String(applicant.firstName || applicant.name || "").trim(),
+      surname: String(applicant.surname || applicant.lastName || "").trim(),
+      contact: String(applicant.mobile || applicant.contact || payload.phone || "").trim(),
+      email: String(applicant.email || payload.email || "").trim(),
+      id: String(applicant.idNumber || payload.idNumber || "").trim(),
+      appId: String(leadId || "").trim(),
+    };
+  };
+
+  const runCreditCheck = async (payload) => {
+    const leadId = resolveLeadId(payload);
+    if (!leadId) {
+      throw new Error("leadId is required (or leadCorrelationId that maps to a CREATE_LEAD)");
+    }
+    const request = buildCreditQuickRequest(payload, leadId);
+    if (CREDIT_CHECK_MODE !== "stub") {
+      throw new Error(`Unsupported CREDIT_CHECK_MODE=${CREDIT_CHECK_MODE}. Configure provider adapter or set stub.`);
+    }
+    const digits = String(request.id || "").replace(/\D+/g, "");
+    const seed = digits.split("").reduce((acc, d, idx) => acc + Number(d || 0) * (idx + 3), 0);
+    const score = Math.max(0, Math.min(999, 450 + (seed % 360)));
+    const band = scoreBandFor(score);
+    return {
+      mode: "stub",
+      provider: "CPB",
+      leadId: String(leadId),
+      score,
+      band,
+      decision: decisionForBand(band),
+      providerCode: "000",
+      providerRef: `stub_${uuidv4()}`,
+      request,
+      response: {
+        response_status: "Success",
+        result: {
+          CreditScoreList: [{ CreditScore: score, CreditScoreCategory: band, ScoreDate: new Date().toISOString().slice(0, 10) }],
+          status_message: "OK",
+          bh_response_code: "000",
+          http_code: "200",
+          request_reference: `stub_${uuidv4()}`,
+        },
+        score,
+      },
+    };
   };
 
   const result = { processedAt: now };
@@ -2371,14 +2351,33 @@ async function processCommand(commandType, payload) {
 
   switch (commandType) {
     case "CREATE_LEAD": {
-      const evolve = await evolvesaCreateLead(payload);
-      result.leadId = evolve.leadId;
-      result.provider = "EvolveSA";
-      result.mode = evolve.mode;
-      if (evolve.warning) result.warning = evolve.warning;
-      if (evolve.rawRef) result.rawRef = evolve.rawRef;
-      if (evolve.debug) result.evolvesaDebug = evolve.debug;
+      const provider = resolveCrmProvider(payload?._tenantContext || {});
+      const lead = await provider.createLead(payload);
+      result.leadId = lead.leadId;
+      result.provider = lead.provider || provider.providerName || "EvolveSA";
+      result.mode = lead.mode;
+      if (lead.warning) result.warning = lead.warning;
+      if (lead.rawRef) result.rawRef = lead.rawRef;
+      if (lead.debug) result.evolvesaDebug = lead.debug;
       result.lead = payload?.driverLicense || payload?.lead || {};
+      return result;
+    }
+    case "CREDIT_CHECK": {
+      const credit = await runCreditCheck(payload);
+      result.leadId = credit.leadId;
+      result.provider = credit.provider;
+      result.mode = credit.mode;
+      result.creditCheck = {
+        score: credit.score,
+        band: credit.band,
+        decision: credit.decision,
+        providerCode: credit.providerCode,
+        providerRef: credit.providerRef,
+      };
+      result.creditCheckDebug = {
+        request: credit.request,
+        response: credit.response,
+      };
       return result;
     }
     case "SHARE_LEAD": {
@@ -2390,13 +2389,14 @@ async function processCommand(commandType, payload) {
       return result;
     }
     case "CREATE_STOCK_UNIT": {
-      const evolve = await evolvesaCreateStockUnit(payload);
-      result.stockUnitId = evolve.stockUnitId;
-      result.provider = "EvolveSA";
-      result.mode = evolve.mode;
-      if (evolve.warning) result.warning = evolve.warning;
-      if (evolve.rawRef) result.rawRef = evolve.rawRef;
-      if (evolve.debug) result.evolvesaDebug = evolve.debug;
+      const provider = resolveCrmProvider(payload?._tenantContext || {});
+      const stock = await provider.createStockUnit(payload);
+      result.stockUnitId = stock.stockUnitId;
+      result.provider = stock.provider || provider.providerName || "EvolveSA";
+      result.mode = stock.mode;
+      if (stock.warning) result.warning = stock.warning;
+      if (stock.rawRef) result.rawRef = stock.rawRef;
+      if (stock.debug) result.evolvesaDebug = stock.debug;
       result.vehicle = payload?.vehicle || payload?.stock || {};
       return result;
     }
@@ -2702,7 +2702,27 @@ app.get("/api/v1/admin/tenant-config", requireTenantAdmin, (req, res) => {
   });
 });
 
+app.get("/api/v1/admin/tenant-config/history", requireTenantAdmin, (req, res) => {
+  const limitRaw = Number(req.query.limit || 50);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.floor(limitRaw))) : 50;
+  const history = readTenantConfigHistory().slice(-limit).reverse();
+  return res.json({ ok: true, count: history.length, history });
+});
+
+app.post("/api/v1/admin/tenant-config/preflight", requireTenantAdmin, (req, res) => {
+  const payload = req.body || {};
+  const validationError = validateTenantConfigPayload(payload);
+  if (validationError) {
+    return res.status(400).json({ ok: false, error: "invalid_tenant_config", detail: validationError });
+  }
+  const report = buildTenantConfigPreflightReport(payload);
+  return res.json({ ok: true, preflight: report });
+});
+
 app.put("/api/v1/admin/tenant-config", requireTenantAdmin, (req, res) => {
+  if (!TENANT_ADMIN_EDITOR_ROLES.has(req.tenantAdminRole)) {
+    return res.status(403).json({ error: "forbidden", hint: "tenant_admin_editor_required" });
+  }
   const payload = req.body || {};
   const validationError = validateTenantConfigPayload(payload);
   if (validationError) return res.status(400).json({ error: "invalid_tenant_config", detail: validationError });
@@ -2714,6 +2734,7 @@ app.put("/api/v1/admin/tenant-config", requireTenantAdmin, (req, res) => {
   try {
     ensureDataDir();
     fs.writeFileSync(saveTarget, JSON.stringify(payload, null, 2), "utf8");
+    appendTenantConfigHistory("update", payload, req);
   } catch (e) {
     return res.status(500).json({
       error: "tenant_config_persist_failed",
@@ -2730,6 +2751,128 @@ app.put("/api/v1/admin/tenant-config", requireTenantAdmin, (req, res) => {
   });
   return res.json({
     ok: true,
+    savedTo: saveTarget,
+    ...tenantConfigSnapshot(),
+  });
+});
+
+app.get("/api/v1/admin/tenant-config/proposals", requireTenantAdmin, (req, res) => {
+  const items = readTenantConfigProposals().slice().reverse();
+  return res.json({ ok: true, count: items.length, proposals: items });
+});
+
+app.post("/api/v1/admin/tenant-config/proposals", requireTenantAdmin, (req, res) => {
+  if (!TENANT_ADMIN_EDITOR_ROLES.has(req.tenantAdminRole)) {
+    return res.status(403).json({ error: "forbidden", hint: "tenant_admin_editor_required" });
+  }
+  const payload = req.body || {};
+  const validationError = validateTenantConfigPayload(payload);
+  if (validationError) return res.status(400).json({ error: "invalid_tenant_config", detail: validationError });
+  const proposals = readTenantConfigProposals();
+  const proposal = {
+    id: `prop_${uuidv4()}`,
+    status: "pending",
+    createdAt: new Date().toISOString(),
+    createdBy: req.tenantAdminEmail || "unknown",
+    role: req.tenantAdminRole || "unknown",
+    payload,
+  };
+  proposals.push(proposal);
+  try {
+    ensureDataDir();
+    writeTenantConfigProposals(proposals);
+  } catch (e) {
+    return res.status(500).json({ error: "proposal_persist_failed", detail: e?.message || String(e) });
+  }
+  return res.status(202).json({ ok: true, proposal });
+});
+
+app.post("/api/v1/admin/tenant-config/proposals/:id/approve", requireTenantAdmin, (req, res) => {
+  if (!TENANT_ADMIN_APPROVER_ROLES.has(req.tenantAdminRole)) {
+    return res.status(403).json({ error: "forbidden", hint: "tenant_admin_approver_required" });
+  }
+  const id = String(req.params.id || "").trim();
+  if (!id) return res.status(400).json({ error: "id_required" });
+  const proposals = readTenantConfigProposals();
+  const idx = proposals.findIndex((x) => String(x?.id || "") === id);
+  if (idx < 0) return res.status(404).json({ error: "proposal_not_found" });
+  const proposal = proposals[idx];
+  if (proposal.status !== "pending") return res.status(409).json({ error: "proposal_not_pending" });
+  if (req.tenantAdminEmail && proposal.createdBy === req.tenantAdminEmail) {
+    return res.status(403).json({ error: "forbidden", hint: "maker_cannot_approve_own_change" });
+  }
+  const validationError = validateTenantConfigPayload(proposal.payload);
+  if (validationError) return res.status(400).json({ error: "invalid_tenant_config", detail: validationError });
+  const source = "approved_proposal_runtime";
+  applyTenantConfigPayload(proposal.payload, source);
+  const saveTarget = String(process.env.TENANT_CONFIG_FILE || "").trim() || TENANT_CONFIG_RUNTIME_FILE;
+  try {
+    ensureDataDir();
+    fs.writeFileSync(saveTarget, JSON.stringify(proposal.payload, null, 2), "utf8");
+    proposal.status = "approved";
+    proposal.approvedAt = new Date().toISOString();
+    proposal.approvedBy = req.tenantAdminEmail || "unknown";
+    proposals[idx] = proposal;
+    writeTenantConfigProposals(proposals);
+    appendTenantConfigHistory("proposal_approved", proposal.payload, req);
+  } catch (e) {
+    return res.status(500).json({ error: "tenant_config_persist_failed", detail: e?.message || String(e) });
+  }
+  return res.json({ ok: true, proposal, savedTo: saveTarget, ...tenantConfigSnapshot() });
+});
+
+app.post("/api/v1/admin/tenant-config/proposals/:id/reject", requireTenantAdmin, (req, res) => {
+  if (!TENANT_ADMIN_APPROVER_ROLES.has(req.tenantAdminRole)) {
+    return res.status(403).json({ error: "forbidden", hint: "tenant_admin_approver_required" });
+  }
+  const id = String(req.params.id || "").trim();
+  if (!id) return res.status(400).json({ error: "id_required" });
+  const proposals = readTenantConfigProposals();
+  const idx = proposals.findIndex((x) => String(x?.id || "") === id);
+  if (idx < 0) return res.status(404).json({ error: "proposal_not_found" });
+  const proposal = proposals[idx];
+  if (proposal.status !== "pending") return res.status(409).json({ error: "proposal_not_pending" });
+  proposal.status = "rejected";
+  proposal.rejectedAt = new Date().toISOString();
+  proposal.rejectedBy = req.tenantAdminEmail || "unknown";
+  proposals[idx] = proposal;
+  try {
+    ensureDataDir();
+    writeTenantConfigProposals(proposals);
+  } catch (e) {
+    return res.status(500).json({ error: "proposal_persist_failed", detail: e?.message || String(e) });
+  }
+  return res.json({ ok: true, proposal });
+});
+
+app.post("/api/v1/admin/tenant-config/rollback/:id", requireTenantAdmin, (req, res) => {
+  const id = String(req.params.id || "").trim();
+  if (!id) return res.status(400).json({ error: "id_required" });
+  const history = readTenantConfigHistory();
+  const hit = history.find((x) => String(x?.id || "") === id);
+  if (!hit || !hit.payload || typeof hit.payload !== "object") {
+    return res.status(404).json({ error: "history_entry_not_found" });
+  }
+  const validationError = validateTenantConfigPayload(hit.payload);
+  if (validationError) {
+    return res.status(400).json({ error: "invalid_history_payload", detail: validationError });
+  }
+  applyTenantConfigPayload(hit.payload, "rollback_runtime");
+  const saveTarget = String(process.env.TENANT_CONFIG_FILE || "").trim() || TENANT_CONFIG_RUNTIME_FILE;
+  try {
+    ensureDataDir();
+    fs.writeFileSync(saveTarget, JSON.stringify(hit.payload, null, 2), "utf8");
+    appendTenantConfigHistory("rollback", hit.payload, req);
+  } catch (e) {
+    return res.status(500).json({
+      error: "tenant_config_persist_failed",
+      detail: e?.message || String(e),
+      appliedInMemory: true,
+    });
+  }
+  return res.json({
+    ok: true,
+    rolledBackTo: id,
     savedTo: saveTarget,
     ...tenantConfigSnapshot(),
   });
@@ -3230,6 +3373,254 @@ app.post("/api/v1/stock-take/submit", requireAuth, extractTenantContext, (req, r
     summary,
     items,
   });
+});
+
+app.get("/api/v1/analytics/kpis", requireAuth, extractTenantContext, (req, res) => {
+  const tenant = req.tenantContext || {};
+  const dealerId = String(req.query.dealerId || tenant.dealerId || "").trim();
+  const branchId = String(req.query.branchId || tenant.branchId || "").trim();
+  const from = toIsoDate(req.query.from || `${monthPeriod()}-01T00:00:00.000Z`);
+  const to = toIsoDate(req.query.to || new Date());
+  if (!dealerId) return sendApiError(req, res, 400, "invalid_dealer", "dealerId is required.");
+  const rows = commandsInWindow(from, to);
+  const kpis = aggregateKpis(rows, dealerId, branchId);
+  return res.json({
+    ok: true,
+    dealerId,
+    branchId: branchId || null,
+    from,
+    to,
+    kpis,
+  });
+});
+
+app.put("/api/v1/analytics/targets", requireAuth, extractTenantContext, (req, res) => {
+  const tenant = req.tenantContext || {};
+  const body = isPlainObject(req.body) ? req.body : {};
+  const dealerId = String(body.dealerId || tenant.dealerId || "").trim();
+  const branchId = String(body.branchId || "").trim();
+  const period = String(body.period || monthPeriod()).trim();
+  if (!dealerId) return sendApiError(req, res, 400, "invalid_dealer", "dealerId is required.");
+  if (!/^\d{4}-\d{2}$/.test(period)) return sendApiError(req, res, 400, "invalid_period", "period must be YYYY-MM.");
+  const targets = isPlainObject(body.targets) ? body.targets : {};
+  const normalized = {
+    leads: Number(targets.leads || 0),
+    stockUnits: Number(targets.stockUnits || 0),
+    shares: Number(targets.shares || 0),
+    creditChecks: Number(targets.creditChecks || 0),
+    deliveries: Number(targets.deliveries || 0),
+    testDrives: Number(targets.testDrives || 0),
+  };
+  const plan = {
+    dealerId,
+    branchId,
+    period,
+    targets: normalized,
+    updatedAt: new Date().toISOString(),
+    updatedByUserId: tenant.userId || null,
+    updatedByEmail: tenant.userEmail || null,
+  };
+  targetPlans.set(tenantKey(dealerId, branchId, period), plan);
+  persistStore();
+  return res.json({ ok: true, plan });
+});
+
+app.get("/api/v1/analytics/targets", requireAuth, extractTenantContext, (req, res) => {
+  const tenant = req.tenantContext || {};
+  const dealerId = String(req.query.dealerId || tenant.dealerId || "").trim();
+  const branchId = String(req.query.branchId || "").trim();
+  const period = String(req.query.period || monthPeriod()).trim();
+  if (!dealerId) return sendApiError(req, res, 400, "invalid_dealer", "dealerId is required.");
+  const plan = targetPlans.get(tenantKey(dealerId, branchId, period)) || null;
+  return res.json({ ok: true, dealerId, branchId: branchId || null, period, plan });
+});
+
+app.get("/api/v1/analytics/forecast", requireAuth, extractTenantContext, (req, res) => {
+  const tenant = req.tenantContext || {};
+  const dealerId = String(req.query.dealerId || tenant.dealerId || "").trim();
+  const branchId = String(req.query.branchId || "").trim();
+  const period = String(req.query.period || monthPeriod()).trim();
+  if (!dealerId) return sendApiError(req, res, 400, "invalid_dealer", "dealerId is required.");
+  const from = `${period}-01T00:00:00.000Z`;
+  const to = new Date().toISOString();
+  const rows = commandsInWindow(from, to);
+  const kpis = aggregateKpis(rows, dealerId, branchId);
+  const now = new Date();
+  const start = new Date(`${period}-01T00:00:00.000Z`);
+  const elapsedDays = Math.max(1, Math.ceil((now.getTime() - start.getTime()) / 86400000));
+  const forecast = {
+    leads: rollingForecast(kpis.createdLeads, elapsedDays, 30),
+    stockUnits: rollingForecast(kpis.stockUnits, elapsedDays, 30),
+    shares: rollingForecast(kpis.sharedStock, elapsedDays, 30),
+    creditChecks: rollingForecast(kpis.creditChecks, elapsedDays, 30),
+  };
+  const plan = targetPlans.get(tenantKey(dealerId, branchId, period)) || null;
+  const target = plan?.targets || {};
+  const alerts = [
+    {
+      metric: "leads",
+      actual: kpis.createdLeads,
+      forecast: forecast.leads,
+      target: Number(target.leads || 0),
+      band: computeBandLabel(forecast.leads ?? kpis.createdLeads, target.leads),
+    },
+    {
+      metric: "stockUnits",
+      actual: kpis.stockUnits,
+      forecast: forecast.stockUnits,
+      target: Number(target.stockUnits || 0),
+      band: computeBandLabel(forecast.stockUnits ?? kpis.stockUnits, target.stockUnits),
+    },
+    {
+      metric: "shares",
+      actual: kpis.sharedStock,
+      forecast: forecast.shares,
+      target: Number(target.shares || 0),
+      band: computeBandLabel(forecast.shares ?? kpis.sharedStock, target.shares),
+    },
+  ];
+  return res.json({ ok: true, dealerId, branchId: branchId || null, period, elapsedDays, kpis, forecast, alerts });
+});
+
+app.get("/api/v1/analytics/oem-rollup", requireAuth, extractTenantContext, (req, res) => {
+  const period = String(req.query.period || monthPeriod()).trim();
+  const from = `${period}-01T00:00:00.000Z`;
+  const to = new Date().toISOString();
+  const rows = commandsInWindow(from, to);
+  const dealerIds = new Set();
+  for (const c of rows) {
+    const d = String(c?.tenantContext?.dealerId || "").trim();
+    if (d) dealerIds.add(d);
+  }
+  const dealers = Array.from(dealerIds).map((dealerId) => {
+    const kpis = aggregateKpis(rows, dealerId, "");
+    const plan = targetPlans.get(tenantKey(dealerId, "", period)) || null;
+    return {
+      dealerId,
+      kpis,
+      targetSummary: plan?.targets || null,
+      leadBand: computeBandLabel(kpis.createdLeads, plan?.targets?.leads),
+    };
+  });
+  const totals = dealers.reduce(
+    (acc, d) => {
+      acc.createdLeads += Number(d.kpis.createdLeads || 0);
+      acc.stockUnits += Number(d.kpis.stockUnits || 0);
+      acc.sharedStock += Number(d.kpis.sharedStock || 0);
+      acc.creditChecks += Number(d.kpis.creditChecks || 0);
+      return acc;
+    },
+    { createdLeads: 0, stockUnits: 0, sharedStock: 0, creditChecks: 0 }
+  );
+  return res.json({ ok: true, period, dealers, totals });
+});
+
+app.post("/api/v1/test-drives/start", requireAuth, extractTenantContext, (req, res) => {
+  const tenant = req.tenantContext || {};
+  const body = isPlainObject(req.body) ? req.body : {};
+  const leadId = String(body.leadId || "").trim();
+  const vehicleRef = String(body.vehicleRef || body.stockUnitId || "").trim();
+  const driverIdNumber = String(body.driverIdNumber || "").trim();
+  const mobile = String(body.mobile || "").trim();
+  const emergencyMobile = String(body.emergencyMobile || "").trim();
+  const plannedReturnAt = toIsoDate(body.plannedReturnAt);
+  if (!leadId || !vehicleRef || !driverIdNumber || !mobile || !plannedReturnAt) {
+    return sendApiError(
+      req,
+      res,
+      400,
+      "invalid_payload",
+      "leadId, vehicleRef, driverIdNumber, mobile and plannedReturnAt are required."
+    );
+  }
+  const sessionId = `td_${uuidv4()}`;
+  const session = {
+    sessionId,
+    status: "active",
+    startedAt: new Date().toISOString(),
+    plannedReturnAt,
+    checkedInAt: null,
+    completedAt: null,
+    tenantContext: buildTenantScope(tenant),
+    salespersonUserId: tenant.userId || null,
+    salespersonEmail: tenant.userEmail || null,
+    leadId,
+    vehicleRef,
+    driverIdNumber,
+    mobile,
+    emergencyMobile: emergencyMobile || null,
+    currentLocation: body.currentLocation || null,
+    notes: String(body.notes || "").trim() || null,
+    checkins: [],
+  };
+  testDriveSessions.set(sessionId, session);
+  persistStore();
+  return res.status(201).json({ ok: true, session });
+});
+
+app.post("/api/v1/test-drives/:sessionId/checkin", requireAuth, extractTenantContext, (req, res) => {
+  const sessionId = String(req.params.sessionId || "").trim();
+  const session = testDriveSessions.get(sessionId);
+  if (!session) return sendApiError(req, res, 404, "not_found");
+  if (!canAccessTenantScopedRecord(session.tenantContext, req.tenantContext || {})) {
+    return sendApiError(req, res, 403, "forbidden", "You cannot check in this session.");
+  }
+  if (session.status !== "active") {
+    return sendApiError(req, res, 409, "invalid_state", "Only active sessions can be checked in.");
+  }
+  const body = isPlainObject(req.body) ? req.body : {};
+  const checkin = {
+    at: new Date().toISOString(),
+    location: body.location || null,
+    note: String(body.note || "").trim() || null,
+    userId: req.tenantContext?.userId || null,
+  };
+  session.checkins.push(checkin);
+  session.checkedInAt = checkin.at;
+  session.updatedAt = checkin.at;
+  testDriveSessions.set(sessionId, session);
+  persistStore();
+  return res.json({ ok: true, sessionId, checkin });
+});
+
+app.post("/api/v1/test-drives/:sessionId/complete", requireAuth, extractTenantContext, (req, res) => {
+  const sessionId = String(req.params.sessionId || "").trim();
+  const session = testDriveSessions.get(sessionId);
+  if (!session) return sendApiError(req, res, 404, "not_found");
+  if (!canAccessTenantScopedRecord(session.tenantContext, req.tenantContext || {})) {
+    return sendApiError(req, res, 403, "forbidden", "You cannot complete this session.");
+  }
+  if (session.status !== "active") {
+    return sendApiError(req, res, 409, "invalid_state", "Session is already closed.");
+  }
+  const body = isPlainObject(req.body) ? req.body : {};
+  session.status = "completed";
+  session.completedAt = new Date().toISOString();
+  session.completedByUserId = req.tenantContext?.userId || null;
+  session.returnLocation = body.returnLocation || null;
+  session.returnNotes = String(body.returnNotes || "").trim() || null;
+  session.updatedAt = session.completedAt;
+  testDriveSessions.set(sessionId, session);
+  persistStore();
+  return res.json({ ok: true, session });
+});
+
+app.get("/api/v1/test-drives/active", requireAuth, extractTenantContext, (req, res) => {
+  const tenant = req.tenantContext || {};
+  const nowMs = Date.now();
+  const sessions = Array.from(testDriveSessions.values()).filter((s) =>
+    s.status === "active" && canAccessTenantScopedRecord(s.tenantContext, tenant)
+  );
+  const withRisk = sessions.map((s) => {
+    const dueMs = Date.parse(String(s.plannedReturnAt || ""));
+    const overdueMinutes = Number.isFinite(dueMs) ? Math.max(0, Math.floor((nowMs - dueMs) / 60000)) : 0;
+    return {
+      ...s,
+      overdueMinutes,
+      safetyStatus: overdueMinutes >= 30 ? "overdue_high_risk" : overdueMinutes > 0 ? "overdue" : "on_track",
+    };
+  });
+  return res.json({ ok: true, count: withRisk.length, sessions: withRisk });
 });
 
 app.get("/api/v1/approvals", requireAuth, extractTenantContext, (req, res) => {

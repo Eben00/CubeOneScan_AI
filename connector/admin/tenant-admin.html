@@ -19,6 +19,7 @@
     input, select, textarea { width: 100%; box-sizing: border-box; padding: 8px; margin-top: 4px; margin-bottom: 10px; }
     textarea { min-height: 180px; font-family: Consolas, monospace; }
     .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btns button[disabled] { opacity: 0.45; cursor: not-allowed; }
     .ok { color: #0a7a21; }
     .err { color: #b00020; white-space: pre-wrap; }
   </style>
@@ -114,6 +115,7 @@
     <h3>Verify & Save</h3>
     <div class="btns">
       <button onclick="previewConfig()">Preview JSON</button>
+      <button onclick="preflightWizard()">Run Preflight</button>
       <button onclick="saveWizard()">Save to Connector + Auth</button>
       <button onclick="nextStep(3)">Back</button>
     </div>
@@ -129,6 +131,7 @@
         <textarea id="connectorJson"></textarea>
         <div class="btns">
           <button onclick="loadConnector()">Load Connector</button>
+          <button onclick="preflightConnector()">Preflight Connector</button>
           <button onclick="saveConnector()">Save Connector</button>
         </div>
         <div id="connectorResult" class="small"></div>
@@ -138,9 +141,42 @@
         <textarea id="authJson"></textarea>
         <div class="btns">
           <button onclick="loadAuth()">Load Auth</button>
+          <button onclick="preflightAuth()">Preflight Auth</button>
           <button onclick="saveAuth()">Save Auth</button>
         </div>
         <div id="authResult" class="small"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Proposal Workflow (Phase 5)</h3>
+    <div class="row">
+      <div class="col">
+        <h4>Connector Proposals</h4>
+        <div class="btns">
+          <button onclick="createConnectorProposal()">Create Connector Proposal</button>
+          <button onclick="listConnectorProposals()">List Connector Proposals</button>
+          <button id="connectorApproveBtn" onclick="approveConnectorProposal()" disabled>Approve Selected</button>
+          <button id="connectorRejectBtn" onclick="rejectConnectorProposal()" disabled>Reject Selected</button>
+        </div>
+        <label>Selected Proposal ID</label>
+        <input id="connectorProposalId" placeholder="prop_xxx" />
+        <select id="connectorProposals" size="8" onchange="onPickConnectorProposal()"></select>
+        <div id="connectorProposalResult" class="small"></div>
+      </div>
+      <div class="col">
+        <h4>Auth Proposals</h4>
+        <div class="btns">
+          <button onclick="createAuthProposal()">Create Auth Proposal</button>
+          <button onclick="listAuthProposals()">List Auth Proposals</button>
+          <button id="authApproveBtn" onclick="approveAuthProposal()" disabled>Approve Selected</button>
+          <button id="authRejectBtn" onclick="rejectAuthProposal()" disabled>Reject Selected</button>
+        </div>
+        <label>Selected Proposal ID</label>
+        <input id="authProposalId" placeholder="prop_xxx" />
+        <select id="authProposals" size="8" onchange="onPickAuthProposal()"></select>
+        <div id="authProposalResult" class="small"></div>
       </div>
     </div>
   </div>
@@ -149,6 +185,8 @@
     function $(id){ return document.getElementById(id); }
     let currentStep = 1;
     const wizardState = { staffEmails: [] };
+    const connectorProposalById = new Map();
+    const authProposalById = new Map();
 
     function setStatus(msg, cls){ const el=$("status"); el.className="small " + (cls||""); el.textContent=msg; }
     function show(elId, msg, ok){ const el=$(elId); el.className=(ok?"small ok":"small err"); el.textContent=msg; }
@@ -170,6 +208,18 @@
       let json = null; try { json = text ? JSON.parse(text) : null; } catch(_) {}
       if (!res.ok) throw new Error((json && (json.error || json.detail)) ? JSON.stringify(json, null, 2) : text || (res.status + " " + res.statusText));
       return json || {};
+    }
+    function formatPreflight(serviceName, report){
+      const preflight = report && report.preflight ? report.preflight : {};
+      const issues = Array.isArray(preflight.issues) ? preflight.issues : [];
+      const warnings = Array.isArray(preflight.warnings) ? preflight.warnings : [];
+      const summary = preflight.summary || {};
+      const parts = [];
+      parts.push(serviceName + " preflight: " + (preflight.valid ? "PASS" : "FAIL"));
+      parts.push("Summary: " + JSON.stringify(summary));
+      if (issues.length) parts.push("Issues:\n- " + issues.join("\n- "));
+      if (warnings.length) parts.push("Warnings:\n- " + warnings.join("\n- "));
+      return { valid: Boolean(preflight.valid), text: parts.join("\n\n") };
     }
     function canonicalConnector(snapshot){
       return {
@@ -253,11 +303,228 @@
         const payload = buildWizardPayloads();
         $("connectorJson").value = JSON.stringify(payload.connector, null, 2);
         $("authJson").value = JSON.stringify(payload.auth, null, 2);
+        await preflightConnector(true);
+        await preflightAuth(true);
         await saveConnector();
         await saveAuth();
         show("wizardResult", "Saved to connector and auth successfully.", true);
       } catch (e) {
         show("wizardResult", String(e.message || e), false);
+      }
+    }
+    async function preflightConnector(throwOnFail){
+      try {
+        const payload = JSON.parse($("connectorJson").value || "{}");
+        const data = await safeFetch(toBase($("connectorBase").value) + "/api/v1/admin/tenant-config/preflight", {
+          method: "POST",
+          headers: { ...headersForConnector(), "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const formatted = formatPreflight("Connector", data);
+        show("connectorResult", formatted.text, formatted.valid);
+        if (!formatted.valid && throwOnFail) throw new Error("Connector preflight failed. Fix issues before save.");
+        return data;
+      } catch (e) {
+        show("connectorResult", String(e.message || e), false);
+        if (throwOnFail) throw e;
+        return null;
+      }
+    }
+    async function preflightAuth(throwOnFail){
+      try {
+        const payload = JSON.parse($("authJson").value || "{}");
+        const data = await safeFetch(toBase($("authBase").value) + "/api/v1/admin/tenant-config/preflight", {
+          method: "POST",
+          headers: { ...headersForAuth(), "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const formatted = formatPreflight("Auth", data);
+        show("authResult", formatted.text, formatted.valid);
+        if (!formatted.valid && throwOnFail) throw new Error("Auth preflight failed. Fix issues before save.");
+        return data;
+      } catch (e) {
+        show("authResult", String(e.message || e), false);
+        if (throwOnFail) throw e;
+        return null;
+      }
+    }
+    async function preflightWizard(){
+      try {
+        const payload = buildWizardPayloads();
+        $("connectorJson").value = JSON.stringify(payload.connector, null, 2);
+        $("authJson").value = JSON.stringify(payload.auth, null, 2);
+        const connectorReport = await preflightConnector(false);
+        const authReport = await preflightAuth(false);
+        const connectorOk = Boolean(connectorReport && connectorReport.preflight && connectorReport.preflight.valid);
+        const authOk = Boolean(authReport && authReport.preflight && authReport.preflight.valid);
+        if (connectorOk && authOk) {
+          show("wizardResult", "Preflight passed for connector and auth.", true);
+        } else {
+          show("wizardResult", "Preflight found issues. Fix connector/auth errors before saving.", false);
+        }
+      } catch (e) {
+        show("wizardResult", String(e.message || e), false);
+      }
+    }
+    function proposalLabel(p){
+        const id = p && p.id ? p.id : "unknown";
+        const status = p && p.status ? p.status : "unknown";
+        const createdBy = p && p.createdBy ? p.createdBy : "unknown";
+        const createdAt = p && p.createdAt ? p.createdAt : "";
+        const approvedBy = p && p.approvedBy ? p.approvedBy : "";
+        const approvedAt = p && p.approvedAt ? p.approvedAt : "";
+        const marker = status === "pending" ? "[PENDING]" : status === "approved" ? "[APPROVED]" : status === "rejected" ? "[REJECTED]" : "[UNKNOWN]";
+        let line = `${marker} ${id} | ${status} | createdBy=${createdBy} | createdAt=${createdAt}`;
+        if (approvedBy || approvedAt) line += ` | approvedBy=${approvedBy} | approvedAt=${approvedAt}`;
+        return line;
+    }
+    function updateProposalButtons(service){
+      const isConnector = service === "connector";
+      const id = (isConnector ? $("connectorProposalId") : $("authProposalId")).value.trim();
+      const map = isConnector ? connectorProposalById : authProposalById;
+      const item = id ? map.get(id) : null;
+      const pending = Boolean(item && item.status === "pending");
+      (isConnector ? $("connectorApproveBtn") : $("authApproveBtn")).disabled = !pending;
+      (isConnector ? $("connectorRejectBtn") : $("authRejectBtn")).disabled = !pending;
+    }
+    function fillProposalSelect(selectId, items, service){
+      const el = $(selectId);
+      el.innerHTML = "";
+      const map = service === "connector" ? connectorProposalById : authProposalById;
+      map.clear();
+      (items || []).forEach((p) => {
+        if (p && p.id) map.set(p.id, p);
+        const opt = document.createElement("option");
+        opt.value = p && p.id ? p.id : "";
+        opt.textContent = proposalLabel(p);
+        const status = String(p && p.status ? p.status : "").toLowerCase();
+        if (status === "pending") opt.style.color = "#946200";
+        if (status === "approved") opt.style.color = "#0a7a21";
+        if (status === "rejected") opt.style.color = "#b00020";
+        el.appendChild(opt);
+      });
+      updateProposalButtons(service);
+    }
+    function onPickConnectorProposal(){
+      const el = $("connectorProposals");
+      if (el && el.value) $("connectorProposalId").value = el.value;
+      updateProposalButtons("connector");
+    }
+    function onPickAuthProposal(){
+      const el = $("authProposals");
+      if (el && el.value) $("authProposalId").value = el.value;
+      updateProposalButtons("auth");
+    }
+    async function createConnectorProposal(){
+      try {
+        const payload = JSON.parse($("connectorJson").value || "{}");
+        const data = await safeFetch(toBase($("connectorBase").value) + "/api/v1/admin/tenant-config/proposals", {
+          method: "POST",
+          headers: { ...headersForConnector(), "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (data && data.proposal && data.proposal.id) $("connectorProposalId").value = data.proposal.id;
+        show("connectorProposalResult", "Connector proposal created: " + (data?.proposal?.id || "unknown"), true);
+        await listConnectorProposals();
+      } catch (e) {
+        show("connectorProposalResult", String(e.message || e), false);
+      }
+    }
+    async function listConnectorProposals(){
+      try {
+        const data = await safeFetch(toBase($("connectorBase").value) + "/api/v1/admin/tenant-config/proposals", {
+          headers: headersForConnector(),
+        });
+        const items = Array.isArray(data?.proposals) ? data.proposals : [];
+        fillProposalSelect("connectorProposals", items, "connector");
+        show("connectorProposalResult", `Loaded ${items.length} connector proposals.`, true);
+      } catch (e) {
+        show("connectorProposalResult", String(e.message || e), false);
+      }
+    }
+    async function approveConnectorProposal(){
+      try {
+        const id = $("connectorProposalId").value.trim();
+        if (!id) throw new Error("Enter a connector proposal ID.");
+        const data = await safeFetch(toBase($("connectorBase").value) + "/api/v1/admin/tenant-config/proposals/" + encodeURIComponent(id) + "/approve", {
+          method: "POST",
+          headers: headersForConnector(),
+        });
+        show("connectorProposalResult", "Connector proposal approved: " + (data?.proposal?.id || id), true);
+        await listConnectorProposals();
+        await loadConnector();
+      } catch (e) {
+        show("connectorProposalResult", String(e.message || e), false);
+      }
+    }
+    async function rejectConnectorProposal(){
+      try {
+        const id = $("connectorProposalId").value.trim();
+        if (!id) throw new Error("Enter a connector proposal ID.");
+        const data = await safeFetch(toBase($("connectorBase").value) + "/api/v1/admin/tenant-config/proposals/" + encodeURIComponent(id) + "/reject", {
+          method: "POST",
+          headers: headersForConnector(),
+        });
+        show("connectorProposalResult", "Connector proposal rejected: " + (data?.proposal?.id || id), true);
+        await listConnectorProposals();
+      } catch (e) {
+        show("connectorProposalResult", String(e.message || e), false);
+      }
+    }
+    async function createAuthProposal(){
+      try {
+        const payload = JSON.parse($("authJson").value || "{}");
+        const data = await safeFetch(toBase($("authBase").value) + "/api/v1/admin/tenant-config/proposals", {
+          method: "POST",
+          headers: { ...headersForAuth(), "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (data && data.proposal && data.proposal.id) $("authProposalId").value = data.proposal.id;
+        show("authProposalResult", "Auth proposal created: " + (data?.proposal?.id || "unknown"), true);
+        await listAuthProposals();
+      } catch (e) {
+        show("authProposalResult", String(e.message || e), false);
+      }
+    }
+    async function listAuthProposals(){
+      try {
+        const data = await safeFetch(toBase($("authBase").value) + "/api/v1/admin/tenant-config/proposals", {
+          headers: headersForAuth(),
+        });
+        const items = Array.isArray(data?.proposals) ? data.proposals : [];
+        fillProposalSelect("authProposals", items, "auth");
+        show("authProposalResult", `Loaded ${items.length} auth proposals.`, true);
+      } catch (e) {
+        show("authProposalResult", String(e.message || e), false);
+      }
+    }
+    async function approveAuthProposal(){
+      try {
+        const id = $("authProposalId").value.trim();
+        if (!id) throw new Error("Enter an auth proposal ID.");
+        const data = await safeFetch(toBase($("authBase").value) + "/api/v1/admin/tenant-config/proposals/" + encodeURIComponent(id) + "/approve", {
+          method: "POST",
+          headers: headersForAuth(),
+        });
+        show("authProposalResult", "Auth proposal approved: " + (data?.proposal?.id || id), true);
+        await listAuthProposals();
+        await loadAuth();
+      } catch (e) {
+        show("authProposalResult", String(e.message || e), false);
+      }
+    }
+    async function rejectAuthProposal(){
+      try {
+        const id = $("authProposalId").value.trim();
+        if (!id) throw new Error("Enter an auth proposal ID.");
+        const data = await safeFetch(toBase($("authBase").value) + "/api/v1/admin/tenant-config/proposals/" + encodeURIComponent(id) + "/reject", {
+          method: "POST",
+          headers: headersForAuth(),
+        });
+        show("authProposalResult", "Auth proposal rejected: " + (data?.proposal?.id || id), true);
+        await listAuthProposals();
+      } catch (e) {
+        show("authProposalResult", String(e.message || e), false);
       }
     }
     async function loadConnector(){
@@ -317,6 +584,8 @@
       $("authBase").value = "https://cubeone-auth.onrender.com";
       toggleProviderFields();
       renderStaffList();
+      updateProposalButtons("connector");
+      updateProposalButtons("auth");
     })();
   </script>
 </body>

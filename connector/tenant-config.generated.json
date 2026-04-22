@@ -1,0 +1,30 @@
+{
+  "dealerAliases": {
+    "dealer_cubeone_connector_onrender_com": "1257",
+    "dealer_ldc": "1257",
+    "dealer_drivex": "510",
+    "dealer_integra": "501"
+  },
+  "emailDealerMap": {
+    "ldc.admin@cubeonescan.local": "1257",
+    "drivex.admin@cubeonescan.local": "510",
+    "drivex.ops@cubeonescan.local": "510",
+    "drivex.ops2@cubeonescan.local": "510",
+    "drive.admin@cubeone.local": "510",
+    "integra.admin@cubeonescan.local": "501"
+  },
+  "vmgDealerScopes": [
+    "1257",
+    "501"
+  ],
+  "evolvesaLeadReceivingEntityMap": {
+    "1257": "509|LDC Auto",
+    "510": "510|DriveXperiance",
+    "501": "501|Integra Motor Group"
+  },
+  "evolvesaLeadTriggerUrlByDealer": {
+    "1257": "https://portal-admin.evolvesa.co.za/flows/trigger/<trigger-id>?did=509",
+    "510": "https://portal-admin.evolvesa.co.za/flows/trigger/<trigger-id>?did=510",
+    "501": "https://portal-admin.evolvesa.co.za/flows/trigger/<trigger-id>?did=501"
+  }
+}
