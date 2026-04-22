@@ -97,6 +97,7 @@ const TENANT_ADMIN_TOKEN = String(process.env.TENANT_ADMIN_TOKEN || "").trim();
 const TENANT_CONFIG_RUNTIME_FILE = path.join(AUTH_DATA_DIR, "tenant-config.runtime.json");
 const TENANT_CONFIG_HISTORY_FILE = path.join(AUTH_DATA_DIR, "tenant-config.history.json");
 const TENANT_CONFIG_PROPOSALS_FILE = path.join(AUTH_DATA_DIR, "tenant-config.proposals.json");
+const BUSINESS_ROLES = ["dealer_principal", "sales_manager", "sales_person"];
 const TENANT_ADMIN_EDITOR_ROLES = new Set(
   String(process.env.TENANT_ADMIN_EDITOR_ROLES || "dealer_principal,tenant_admin_editor")
     .split(",")
@@ -109,7 +110,6 @@ const TENANT_ADMIN_APPROVER_ROLES = new Set(
     .map((x) => normalizeRole(x))
     .filter(Boolean)
 );
-const BUSINESS_ROLES = ["dealer_principal", "sales_manager", "sales_person"];
 const LOGIN_MAX_FAILED_ATTEMPTS = Number(process.env.LOGIN_MAX_FAILED_ATTEMPTS || 5);
 const LOGIN_WINDOW_MS = Number(process.env.LOGIN_WINDOW_MS || 15 * 60 * 1000);
 const LOGIN_LOCKOUT_MS = Number(process.env.LOGIN_LOCKOUT_MS || 15 * 60 * 1000);
