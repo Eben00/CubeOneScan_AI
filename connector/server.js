@@ -4,6 +4,7 @@ const express = require("express");
 const { v4: uuidv4 } = require("uuid");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { createEvolvesaProvider } = require("./providers/evolvesa");
 let jwt = null;
 try {
@@ -14,6 +15,7 @@ try {
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: false }));
 
 function normalizeConfigToken(input) {
   let v = String(input || "").trim();
@@ -79,6 +81,7 @@ function loadTenantConfig() {
         vmgDealerScopesRaw: normalizeConfigList(parsed?.vmgDealerScopes),
         evolvesaLeadReceivingEntityMapRaw: normalizeConfigMap(parsed?.evolvesaLeadReceivingEntityMap),
         evolvesaLeadTriggerUrlByDealerRaw: normalizeConfigMap(parsed?.evolvesaLeadTriggerUrlByDealer),
+        vmgStockFeedUrlByDealerRaw: normalizeConfigMap(parsed?.vmgStockFeedUrlByDealer),
       };
     } catch (_) {
       // Try next candidate.
@@ -91,6 +94,7 @@ function loadTenantConfig() {
     vmgDealerScopesRaw: "",
     evolvesaLeadReceivingEntityMapRaw: "",
     evolvesaLeadTriggerUrlByDealerRaw: "",
+    vmgStockFeedUrlByDealerRaw: "",
   };
 }
 
@@ -133,6 +137,12 @@ const AUTOTRADER_TIMEOUT_MS = Number(process.env.AUTOTRADER_TIMEOUT_MS || 12000)
 const AUTOTRADER_LISTINGS_CACHE_TTL_MS = Number(process.env.AUTOTRADER_LISTINGS_CACHE_TTL_MS || 300000);
 const AUTOTRADER_RATE_LIMIT_COOLDOWN_MS = Number(process.env.AUTOTRADER_RATE_LIMIT_COOLDOWN_MS || 180000);
 const VMG_STOCK_FEED_URL = (process.env.VMG_STOCK_FEED_URL || "").trim();
+// Optional: dealerId=feedUrl,... so each VMG dealer can use its own XML feed (e.g. DriveX 510 vs LDC 1257).
+const VMG_STOCK_FEED_URL_BY_DEALER_RAW = (
+  TENANT_CONFIG.vmgStockFeedUrlByDealerRaw ||
+  process.env.VMG_STOCK_FEED_URL_BY_DEALER ||
+  ""
+).trim();
 // Comma-separated VMG/DMS dealer ids that use VMG_STOCK_FEED_URL (not EvolveSA portal company ids).
 const VMG_DEALER_SCOPES_RAW = (TENANT_CONFIG.vmgDealerScopesRaw || process.env.VMG_DEALER_SCOPES || "").trim();
 const VMG_TIMEOUT_MS = Number(process.env.VMG_TIMEOUT_MS || 12000);
@@ -145,6 +155,21 @@ const USER_EMAIL_DEALER_MAP_RAW = (
 ).trim();
 const ENFORCE_TENANT_RINGFENCE = String(process.env.ENFORCE_TENANT_RINGFENCE || "1").trim() !== "0";
 const AUTH_JWT_SECRET = (process.env.AUTH_JWT_SECRET || "").trim();
+const CONSENT_TOKEN_SECRET = (
+  process.env.CONSENT_TOKEN_SECRET ||
+  AUTH_JWT_SECRET ||
+  process.env.API_KEY ||
+  "consent-dev-secret"
+).trim();
+const CONSENT_LINK_BASE_URL = (process.env.CONSENT_LINK_BASE_URL || "").trim();
+const CONSENT_DEFAULT_EXPIRY_HOURS = Number(process.env.CONSENT_DEFAULT_EXPIRY_HOURS || 24);
+const SMTP_HOST = (process.env.SMTP_HOST || "").trim();
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").trim().toLowerCase() === "true";
+const SMTP_USER = (process.env.SMTP_USER || "").trim();
+const SMTP_PASS = (process.env.SMTP_PASS || "").trim();
+const SMTP_FROM_EMAIL = (process.env.SMTP_FROM_EMAIL || "").trim();
+const CONSENT_FROM_EMAIL_BY_DEALER_RAW = (process.env.CONSENT_FROM_EMAIL_BY_DEALER || "").trim();
 const COMMAND_MAX_RETRIES = Number(process.env.COMMAND_MAX_RETRIES || 3);
 const COMMAND_RETRY_DELAY_MS = Number(process.env.COMMAND_RETRY_DELAY_MS || 1200);
 const CREDIT_CHECK_MODE = String(process.env.CREDIT_CHECK_MODE || "stub").trim().toLowerCase();
@@ -348,6 +373,7 @@ const SUBMITTABLE_COMMANDS = new Set([
   "CREATE_LEAD",
   "CREDIT_CHECK",
   "SHARE_LEAD",
+  "LOG_COMMUNICATION",
   VALUATION_COMMAND,
   "CREATE_STOCK_UNIT",
   "SEND_STOCK_TO_LEAD",
@@ -376,6 +402,7 @@ function canSubmitCommand(role, commandType) {
       "CREATE_LEAD",
       "CREDIT_CHECK",
       "SHARE_LEAD",
+      "LOG_COMMUNICATION",
       VALUATION_COMMAND,
       "CREATE_STOCK_UNIT",
       "SEND_STOCK_TO_LEAD",
@@ -388,6 +415,7 @@ function canSubmitCommand(role, commandType) {
     "CREATE_LEAD",
     "CREDIT_CHECK",
     "SHARE_LEAD",
+    "LOG_COMMUNICATION",
     VALUATION_COMMAND,
     "CREATE_STOCK_UNIT",
     "SEND_STOCK_TO_LEAD",
@@ -417,14 +445,14 @@ const stockTakeSessions = new Map(); // sessionId -> hybrid stock take basket
 const targetPlans = new Map(); // tenantKey( dealer|branch|period ) -> target plan
 const alertRules = new Map(); // ruleId -> alert rule
 const testDriveSessions = new Map(); // sessionId -> test-drive safety sessions
+const consentRecords = new Map(); // consentId -> consent record
+const consentEvents = []; // append-only audit trail
 const autoTraderListingsCache = {
   fetchedAtMs: 0,
   rows: [],
 };
-const vmgListingsCache = {
-  fetchedAtMs: 0,
-  rows: [],
-};
+/** Per-feed-url VMG cache (dealer-specific XML URLs). */
+const vmgListingsCacheByUrl = new Map();
 let autoTraderRateLimitedUntilMs = 0;
 
 function parseTokenSet(raw) {
@@ -439,8 +467,42 @@ function parseTokenSet(raw) {
 }
 
 let VMG_DEALER_SCOPES = parseTokenSet(VMG_DEALER_SCOPES_RAW);
+let VMG_STOCK_FEED_URL_BY_DEALER = parseKeyValueMap(VMG_STOCK_FEED_URL_BY_DEALER_RAW);
+
+function vmgDealerHasDedicatedFeedUrl(dealerScope) {
+  const ds = String(dealerScope || "").trim();
+  if (!ds) return false;
+  const raw = ds.toLowerCase();
+  const digits = raw.replace(/\D+/g, "");
+  for (const [k, v] of VMG_STOCK_FEED_URL_BY_DEALER) {
+    const nk = String(k).trim().toLowerCase();
+    const nd = nk.replace(/\D+/g, "");
+    if ((nk === raw || (digits && nd === digits)) && String(v || "").trim()) return true;
+  }
+  return false;
+}
+
+function resolveVmgStockFeedUrl(dealerScope) {
+  const ds = String(dealerScope || "").trim();
+  if (ds) {
+    const raw = ds.toLowerCase();
+    const digits = raw.replace(/\D+/g, "");
+    for (const [k, v] of VMG_STOCK_FEED_URL_BY_DEALER) {
+      const nk = String(k).trim().toLowerCase();
+      const nd = nk.replace(/\D+/g, "");
+      if (nk === raw || (digits && nd === digits)) {
+        const url = String(v || "").trim();
+        if (url) return url;
+      }
+    }
+  }
+  return (VMG_STOCK_FEED_URL || "").trim();
+}
 
 function useVmgFeedForDealer(dealerScope) {
+  const feedUrl = resolveVmgStockFeedUrl(dealerScope);
+  if (!feedUrl) return false;
+  if (vmgDealerHasDedicatedFeedUrl(dealerScope)) return true;
   if (!VMG_STOCK_FEED_URL) return false;
   const raw = String(dealerScope || "").trim().toLowerCase();
   if (!raw) return false;
@@ -453,6 +515,23 @@ function useVmgFeedForDealer(dealerScope) {
     (aliased && VMG_DEALER_SCOPES.has(String(aliased).toLowerCase())) ||
     (aliasedDigits && VMG_DEALER_SCOPES.has(aliasedDigits))
   );
+}
+
+function getVmgListingsBucket(feedUrl) {
+  const key = String(feedUrl || "").trim();
+  if (!key) return { rows: [], fetchedAtMs: 0 };
+  let b = vmgListingsCacheByUrl.get(key);
+  if (!b) {
+    b = { rows: [], fetchedAtMs: 0 };
+    vmgListingsCacheByUrl.set(key, b);
+  }
+  return b;
+}
+
+function vmgCachedRowsForDealerScope(dealerScope) {
+  const url = resolveVmgStockFeedUrl(dealerScope);
+  const b = getVmgListingsBucket(url);
+  return Array.isArray(b.rows) ? b.rows : [];
 }
 
 function ensureDataDir() {
@@ -498,10 +577,17 @@ function loadAutoTraderCache() {
 function persistVmgCache() {
   try {
     ensureDataDir();
+    const feeds = {};
+    for (const [url, bucket] of vmgListingsCacheByUrl) {
+      feeds[url] = {
+        fetchedAtMs: bucket.fetchedAtMs || 0,
+        rows: Array.isArray(bucket.rows) ? bucket.rows : [],
+      };
+    }
     const payload = {
+      version: 2,
       savedAt: new Date().toISOString(),
-      fetchedAtMs: vmgListingsCache.fetchedAtMs || 0,
-      rows: Array.isArray(vmgListingsCache.rows) ? vmgListingsCache.rows : [],
+      feeds,
     };
     fs.writeFileSync(VMG_CACHE_FILE, JSON.stringify(payload, null, 2), "utf8");
   } catch (e) {
@@ -516,14 +602,39 @@ function loadVmgCache() {
     const raw = fs.readFileSync(VMG_CACHE_FILE, "utf8");
     if (!raw.trim()) return;
     const parsed = JSON.parse(raw);
+    vmgListingsCacheByUrl.clear();
+    if (parsed && parsed.version === 2 && parsed.feeds && typeof parsed.feeds === "object") {
+      let total = 0;
+      for (const [url, body] of Object.entries(parsed.feeds)) {
+        if (!url) continue;
+        const rows = Array.isArray(body?.rows) ? body.rows : [];
+        vmgListingsCacheByUrl.set(url, {
+          fetchedAtMs: Number(body?.fetchedAtMs || 0),
+          rows,
+        });
+        total += rows.length;
+      }
+      log("info", "vmg_cache_loaded", {
+        feeds: vmgListingsCacheByUrl.size,
+        rows: total,
+      });
+      return;
+    }
     const rows = Array.isArray(parsed?.rows) ? parsed.rows : [];
     if (rows.length === 0) return;
-    vmgListingsCache.rows = rows;
-    vmgListingsCache.fetchedAtMs = Number(parsed?.fetchedAtMs || Date.now());
-    log("info", "vmg_cache_loaded", {
-      rows: rows.length,
-      cachedAt: new Date(vmgListingsCache.fetchedAtMs).toISOString(),
-    });
+    const defaultUrl = (VMG_STOCK_FEED_URL || "").trim();
+    if (defaultUrl) {
+      vmgListingsCacheByUrl.set(defaultUrl, {
+        fetchedAtMs: Number(parsed?.fetchedAtMs || Date.now()),
+        rows,
+      });
+      log("info", "vmg_cache_loaded", {
+        feeds: 1,
+        rows: rows.length,
+        legacy: true,
+        cachedAt: new Date(Number(parsed?.fetchedAtMs || Date.now())).toISOString(),
+      });
+    }
   } catch (e) {
     log("warn", "vmg_cache_load_failed", { error: e?.message || String(e) });
   }
@@ -618,6 +729,8 @@ function persistStore() {
     targetPlans: Array.from(targetPlans.values()),
     alertRules: Array.from(alertRules.values()),
     testDriveSessions: Array.from(testDriveSessions.values()),
+    consentRecords: Array.from(consentRecords.values()),
+    consentEvents: consentEvents.slice(-5000),
   };
   fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2), "utf8");
 }
@@ -654,6 +767,12 @@ function loadStore() {
   }
   for (const r of parsed.alertRules || []) {
     if (r?.ruleId) alertRules.set(String(r.ruleId), r);
+  }
+  for (const c of parsed.consentRecords || []) {
+    if (c?.consentId) consentRecords.set(String(c.consentId), c);
+  }
+  for (const ev of parsed.consentEvents || []) {
+    consentEvents.push(ev);
   }
   for (const td of parsed.testDriveSessions || []) {
     if (td?.sessionId) testDriveSessions.set(String(td.sessionId), td);
@@ -704,11 +823,11 @@ function validateCommandPayload(commandType, payload) {
       return null;
     }
     case "CREDIT_CHECK": {
-      const consent = payload?.consent;
-      if (!consent || consent.accepted !== true) {
+      const consentId = String(payload?.consentId || "").trim();
+      if (!consentId) {
         return {
           error: "invalid_payload",
-          hint: "CREDIT_CHECK requires payload.consent.accepted=true before running soft check.",
+          hint: "CREDIT_CHECK requires payload.consentId from an approved consent request.",
         };
       }
       const applicant = payload.applicant || {};
@@ -731,6 +850,16 @@ function validateCommandPayload(commandType, payload) {
     case "SHARE_LEAD": {
       if (!payload.leadId && !payload.leadCorrelationId) {
         return { error: "invalid_payload", hint: "SHARE_LEAD requires leadId or leadCorrelationId." };
+      }
+      return null;
+    }
+    case "LOG_COMMUNICATION": {
+      if (!payload.leadId && !payload.leadCorrelationId) {
+        return { error: "invalid_payload", hint: "LOG_COMMUNICATION requires leadId or leadCorrelationId." };
+      }
+      const content = String(payload?.comment?.content || payload?.content || "").trim();
+      if (!content) {
+        return { error: "invalid_payload", hint: "LOG_COMMUNICATION requires comment content." };
       }
       return null;
     }
@@ -852,6 +981,247 @@ function canAccessTenantScopedRecord(recordTenant = {}, requestTenant = {}) {
   const requestBranch = String(requestTenant?.branchId || "").trim();
   if (!recordBranch || !requestBranch) return true;
   return recordBranch === requestBranch;
+}
+
+function consentPublicView(record) {
+  return {
+    consentId: record.consentId,
+    status: record.status,
+    purpose: record.purpose,
+    noticeVersion: record.noticeVersion,
+    requestedAt: record.requestedAt,
+    expiresAt: record.expiresAt,
+    approvedAt: record.approvedAt || null,
+    rejectedAt: record.rejectedAt || null,
+    revokedAt: record.revokedAt || null,
+    leadCorrelationId: record.leadCorrelationId || null,
+    leadId: record.leadId || null,
+    approvalChannel: record.approvalChannel || null,
+    delivery: record.delivery || null,
+  };
+}
+
+function appendConsentEvent(consentId, type, extra = {}) {
+  consentEvents.push({
+    eventId: `cev_${uuidv4()}`,
+    consentId,
+    type,
+    at: new Date().toISOString(),
+    ...extra,
+  });
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function maskIdNumber(idNumber) {
+  const digits = String(idNumber || "").replace(/\D+/g, "");
+  if (digits.length < 6) return "";
+  return `${digits.slice(0, 6)}******${digits.slice(-2)}`;
+}
+
+function base64UrlEncode(input) {
+  return Buffer.from(input)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function base64UrlDecode(input) {
+  const normalized = String(input || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  return Buffer.from(padded, "base64").toString("utf8");
+}
+
+function signConsentToken(payload) {
+  const payloadText = JSON.stringify(payload);
+  const encodedPayload = base64UrlEncode(payloadText);
+  const signature = crypto
+    .createHmac("sha256", CONSENT_TOKEN_SECRET)
+    .update(encodedPayload)
+    .digest("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+  return `${encodedPayload}.${signature}`;
+}
+
+function verifyConsentToken(token) {
+  const raw = String(token || "").trim();
+  if (!raw || !raw.includes(".")) throw new Error("invalid_token");
+  const [payloadEnc, providedSig] = raw.split(".");
+  const expectedSig = crypto
+    .createHmac("sha256", CONSENT_TOKEN_SECRET)
+    .update(payloadEnc)
+    .digest("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+  const match =
+    providedSig &&
+    expectedSig.length === providedSig.length &&
+    crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(providedSig));
+  if (!match) throw new Error("invalid_token_signature");
+  const payload = JSON.parse(base64UrlDecode(payloadEnc));
+  const expMs = Number(payload?.exp || 0) * 1000;
+  if (!Number.isFinite(expMs) || Date.now() >= expMs) throw new Error("token_expired");
+  return payload;
+}
+
+function resolveConsentLinkBase(req) {
+  if (CONSENT_LINK_BASE_URL) return CONSENT_LINK_BASE_URL.replace(/\/$/, "");
+  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "http").split(",")[0].trim();
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
+  return `${proto}://${host}`.replace(/\/$/, "");
+}
+
+function buildConsentApprovalLink(req, token) {
+  const base = resolveConsentLinkBase(req);
+  return `${base}/consent/approve?token=${encodeURIComponent(token)}`;
+}
+
+function parseDealerEntityLabel(value) {
+  const v = String(value || "").trim();
+  if (!v) return "";
+  const sep = v.indexOf("|");
+  if (sep <= 0) return v;
+  return v.slice(sep + 1).trim() || v.slice(0, sep).trim();
+}
+
+function resolveDealerDisplayName(tenantContext = {}) {
+  const dealerId = String(tenantContext?.dealerId || "").trim();
+  if (dealerId && EVOLVESA_LEAD_RECEIVING_ENTITY_MAP.has(dealerId)) {
+    const label = parseDealerEntityLabel(EVOLVESA_LEAD_RECEIVING_ENTITY_MAP.get(dealerId));
+    if (label) return label;
+  }
+  return dealerId ? `Dealer ${dealerId}` : "Your dealership";
+}
+
+function smtpConfigured() {
+  return Boolean(SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS);
+}
+
+let consentMailer = null;
+function getConsentMailer() {
+  if (!smtpConfigured()) return null;
+  if (consentMailer) return consentMailer;
+  // Lazy-load to avoid hard dependency in deployments not using email yet.
+  const nodemailer = require("nodemailer");
+  consentMailer = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS,
+    },
+  });
+  return consentMailer;
+}
+
+function resolveConsentFromAddress(tenantContext = {}, dealerDisplayName = "Dealership") {
+  const dealerId = String(tenantContext?.dealerId || "").trim();
+  const mappedFrom = dealerId ? String(CONSENT_FROM_EMAIL_BY_DEALER.get(dealerId) || "").trim() : "";
+  const fromEmail = mappedFrom || SMTP_FROM_EMAIL || SMTP_USER;
+  return `"${dealerDisplayName}" <${fromEmail}>`;
+}
+
+async function notifyConsentEmail(consentRecord, approveUrl) {
+  const providerRef = `email_${uuidv4()}`;
+  const recipient = normalizeEmail(consentRecord.applicant?.email || "");
+  if (!recipient) {
+    return { emailSent: false, providerRef, warning: "missing_recipient_email" };
+  }
+  const dealerDisplayName = resolveDealerDisplayName(consentRecord.tenantContext || {});
+  if (!smtpConfigured()) {
+    log("warn", "consent_email_not_sent_smtp_not_configured", {
+      consentId: consentRecord.consentId,
+      to: recipient,
+      dealerId: consentRecord.tenantContext?.dealerId || null,
+    });
+    return { emailSent: false, providerRef, warning: "smtp_not_configured" };
+  }
+  const transporter = getConsentMailer();
+  const consentExpiry = consentRecord.expiresAt || "";
+  const customerName = [consentRecord.applicant?.firstName, consentRecord.applicant?.surname].filter(Boolean).join(" ").trim();
+  const subject = `${dealerDisplayName}: Approve your soft credit check`;
+  const text =
+    `Hi ${customerName || "Customer"},\n\n` +
+    `${dealerDisplayName} requests your approval to run a soft credit check.\n` +
+    `Purpose: ${consentRecord.purpose}\n` +
+    `Reference: ${consentRecord.consentId}\n` +
+    `ID: ${consentRecord.applicant?.idNumberMasked || ""}\n` +
+    `Valid until: ${consentExpiry}\n\n` +
+    `Approve or reject here:\n${approveUrl}\n\n` +
+    `If you did not request this, please ignore this email and contact the dealership.`;
+  const html =
+    `<p>Hi ${customerName || "Customer"},</p>` +
+    `<p><strong>${dealerDisplayName}</strong> requests your approval to run a soft credit check.</p>` +
+    `<p>Purpose: ${consentRecord.purpose}<br/>Reference: ${consentRecord.consentId}<br/>` +
+    `ID: ${consentRecord.applicant?.idNumberMasked || ""}<br/>Valid until: ${consentExpiry}</p>` +
+    `<p><a href="${approveUrl}">Review and approve/reject consent</a></p>` +
+    `<p>If you did not request this, please ignore this email and contact the dealership.</p>`;
+  try {
+    const info = await transporter.sendMail({
+      from: resolveConsentFromAddress(consentRecord.tenantContext || {}, dealerDisplayName),
+      to: recipient,
+      subject,
+      text,
+      html,
+    });
+    log("info", "consent_email_sent", {
+      consentId: consentRecord.consentId,
+      to: recipient,
+      dealerId: consentRecord.tenantContext?.dealerId || null,
+      providerRef: info?.messageId || providerRef,
+    });
+    return {
+      emailSent: true,
+      providerRef: info?.messageId || providerRef,
+    };
+  } catch (e) {
+    log("error", "consent_email_send_failed", {
+      consentId: consentRecord.consentId,
+      to: recipient,
+      error: e?.message || String(e),
+    });
+    return {
+      emailSent: false,
+      providerRef,
+      warning: e?.message || String(e),
+    };
+  }
+}
+
+function resolveApprovedConsent(payload, tenantContext) {
+  const consentId = String(payload?.consentId || "").trim();
+  if (!consentId) {
+    throw new Error("consentId is required before soft credit check");
+  }
+  const consent = consentRecords.get(consentId);
+  if (!consent) {
+    throw new Error("Consent record not found");
+  }
+  if (!canAccessTenantScopedRecord(consent.tenantContext || {}, tenantContext || {})) {
+    throw new Error("Consent does not belong to current tenant scope");
+  }
+  if (String(consent.status || "").toLowerCase() !== "approved") {
+    throw new Error("Consent is not approved");
+  }
+  if (consent.expiresAt && Date.parse(consent.expiresAt) <= Date.now()) {
+    throw new Error("Consent has expired");
+  }
+  if (consent.revokedAt) {
+    throw new Error("Consent has been revoked");
+  }
+  const payloadLead = String(payload?.leadCorrelationId || payload?.leadId || "").trim();
+  const consentLead = String(consent.leadCorrelationId || consent.leadId || "").trim();
+  if (payloadLead && consentLead && payloadLead !== consentLead) {
+    throw new Error("Consent does not match the requested lead");
+  }
+  return consent;
 }
 
 function toIsoDate(value) {
@@ -1012,9 +1382,25 @@ function evolveConfigured() {
 function toEvolveLeadPayload(payload) {
   const dl = payload?.driverLicense || payload?.lead || {};
   const tenant = payload?._tenantContext || {};
+  const normalize = (v) =>
+    String(v || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const combinedName = normalize(dl.name || payload?.name || "");
+  let firstName = normalize(dl.NAMES || dl.firstName || payload?.firstName || "");
+  let lastName = normalize(dl.SURNAME || dl.lastName || dl.surname || payload?.lastName || payload?.surname || "");
+  if ((!firstName || !lastName) && combinedName) {
+    const parts = combinedName.split(" ").filter(Boolean);
+    if (parts.length >= 2) {
+      if (!lastName) lastName = parts[parts.length - 1];
+      if (!firstName) firstName = parts.slice(0, -1).join(" ");
+    } else if (!firstName) {
+      firstName = parts[0] || "";
+    }
+  }
   return {
-    firstName: dl.NAMES || dl.firstName || "",
-    lastName: dl.SURNAME || dl.lastName || dl.surname || "",
+    firstName,
+    lastName,
     idNumber: dl.ID_NUMBER || dl.idNumber || "",
     licenseNumber: dl.LICENSE_NUMBER || dl.licenseNumber || "",
     phone: dl.phone || dl.mobile || payload?.phone || "",
@@ -1095,6 +1481,7 @@ function parseKeyValueMap(raw) {
 let EVOLVESA_LEAD_RECEIVING_ENTITY_MAP = parseKeyValueMap(EVOLVESA_LEAD_RECEIVING_ENTITY_MAP_RAW);
 let EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER = parseKeyValueMap(EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER_RAW);
 let CRM_PROVIDER_BY_DEALER = parseKeyValueMap(CRM_PROVIDER_BY_DEALER_RAW);
+let CONSENT_FROM_EMAIL_BY_DEALER = parseKeyValueMap(CONSENT_FROM_EMAIL_BY_DEALER_RAW);
 let CRM_PROVIDER_REGISTRY = {};
 
 function buildCrmProviderRegistry() {
@@ -1122,6 +1509,7 @@ function buildCrmProviderRegistry() {
         stockSourceId: EVOLVESA_STOCK_SOURCE_ID,
         defaultLeadAncillaryArea: EVOLVESA_DEFAULT_LEAD_ANCILLARY_AREA,
         defaultLeadUserArea: EVOLVESA_DEFAULT_LEAD_USER_AREA,
+        communicationEndpoint: process.env.EVOLVESA_COMMUNICATION_ENDPOINT || "",
       },
       maps: {
         leadReceivingEntityMap: EVOLVESA_LEAD_RECEIVING_ENTITY_MAP,
@@ -1257,6 +1645,7 @@ function tenantConfigSnapshot() {
     defaultCrmProvider: DEFAULT_CRM_PROVIDER,
     crmProviderByDealer: Object.fromEntries(CRM_PROVIDER_BY_DEALER),
     vmgDealerScopes: Array.from(VMG_DEALER_SCOPES),
+    vmgStockFeedUrlByDealer: Object.fromEntries(VMG_STOCK_FEED_URL_BY_DEALER),
     evolvesaLeadReceivingEntityMap: Object.fromEntries(EVOLVESA_LEAD_RECEIVING_ENTITY_MAP),
     evolvesaLeadTriggerUrlByDealer: Object.fromEntries(EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER),
   };
@@ -1319,6 +1708,7 @@ function validateTenantConfigPayload(payload) {
     "emailDealerMap",
     "evolvesaLeadReceivingEntityMap",
     "evolvesaLeadTriggerUrlByDealer",
+    "vmgStockFeedUrlByDealer",
   ];
   for (const key of maybeMapKeys) {
     const value = payload[key];
@@ -1374,6 +1764,19 @@ function buildTenantConfigPreflightReport(payload) {
     }
   }
 
+  const vmgFeedMap =
+    payload?.vmgStockFeedUrlByDealer && typeof payload.vmgStockFeedUrlByDealer === "object"
+      ? payload.vmgStockFeedUrlByDealer
+      : {};
+  for (const [dealer, url] of Object.entries(vmgFeedMap)) {
+    const d = normalizeDealerToken(dealer);
+    const u = String(url || "").trim();
+    if (!d) issues.push(`vmgStockFeedUrlByDealer has invalid dealer key: "${dealer}"`);
+    if (!u.startsWith("http://") && !u.startsWith("https://")) {
+      issues.push(`vmgStockFeedUrlByDealer "${dealer}" must be absolute URL`);
+    }
+  }
+
   for (const dealer of vmgScopes) {
     if (evolvesaEntityMap[dealer] == null) {
       warnings.push(`vmg dealer scope "${dealer}" has no evolvesaLeadReceivingEntityMap entry`);
@@ -1390,6 +1793,7 @@ function buildTenantConfigPreflightReport(payload) {
       vmgDealerScopes: vmgScopes.size,
       evolvesaLeadReceivingEntityMap: Object.keys(evolvesaEntityMap).length,
       evolvesaLeadTriggerUrlByDealer: Object.keys(evolvesaTriggerMap).length,
+      vmgStockFeedUrlByDealer: Object.keys(vmgFeedMap).length,
     },
   };
 }
@@ -1402,11 +1806,15 @@ function applyTenantConfigPayload(payload, sourceLabel = "admin_api") {
     vmgDealerScopesRaw: normalizeConfigList(payload.vmgDealerScopes),
     evolvesaLeadReceivingEntityMapRaw: normalizeConfigMap(payload.evolvesaLeadReceivingEntityMap),
     evolvesaLeadTriggerUrlByDealerRaw: normalizeConfigMap(payload.evolvesaLeadTriggerUrlByDealer),
+    vmgStockFeedUrlByDealerRaw: normalizeConfigMap(payload.vmgStockFeedUrlByDealer),
   };
   TENANT_CONFIG = parsed;
   DEALER_ID_ALIASES = parseDealerAliases(parsed.dealerAliasesRaw || DEALER_ID_ALIASES_RAW);
   USER_EMAIL_DEALER_MAP = parseDealerAliases(parsed.userEmailDealerMapRaw || USER_EMAIL_DEALER_MAP_RAW);
   VMG_DEALER_SCOPES = parseTokenSet(parsed.vmgDealerScopesRaw || VMG_DEALER_SCOPES_RAW);
+  VMG_STOCK_FEED_URL_BY_DEALER = parseKeyValueMap(
+    parsed.vmgStockFeedUrlByDealerRaw || process.env.VMG_STOCK_FEED_URL_BY_DEALER || ""
+  );
   EVOLVESA_LEAD_RECEIVING_ENTITY_MAP = parseKeyValueMap(
     parsed.evolvesaLeadReceivingEntityMapRaw || EVOLVESA_LEAD_RECEIVING_ENTITY_MAP_RAW
   );
@@ -1753,23 +2161,25 @@ async function fetchAutoTraderListingsCached(forceRefresh = false) {
   }
 }
 
-async function fetchVmgListingsCached(forceRefresh = false) {
-  if (!VMG_STOCK_FEED_URL) {
-    throw new Error("VMG stock feed is not configured");
+async function fetchVmgListingsCached(forceRefresh = false, dealerScope = "") {
+  const feedUrl = resolveVmgStockFeedUrl(dealerScope);
+  if (!feedUrl) {
+    throw new Error("VMG stock feed is not configured for this dealership");
   }
+  const bucket = getVmgListingsBucket(feedUrl);
   const now = Date.now();
-  if (!forceRefresh && vmgListingsCache.rows.length > 0 && now - vmgListingsCache.fetchedAtMs < VMG_CACHE_TTL_MS) {
+  if (!forceRefresh && bucket.rows.length > 0 && now - bucket.fetchedAtMs < VMG_CACHE_TTL_MS) {
     return {
-      rows: vmgListingsCache.rows,
+      rows: bucket.rows,
       source: "vmg_cache",
-      cachedAt: new Date(vmgListingsCache.fetchedAtMs).toISOString(),
+      cachedAt: new Date(bucket.fetchedAtMs).toISOString(),
     };
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), VMG_TIMEOUT_MS);
   try {
-    const response = await fetch(VMG_STOCK_FEED_URL, {
+    const response = await fetch(feedUrl, {
       method: "GET",
       headers: { Accept: "application/xml,text/xml,*/*" },
       signal: controller.signal,
@@ -1779,13 +2189,13 @@ async function fetchVmgListingsCached(forceRefresh = false) {
       throw new Error(`VMG stock feed HTTP ${response.status}${text ? `: ${text.slice(0, 500)}` : ""}`);
     }
     const normalized = parseVmgStockXml(text);
-    vmgListingsCache.rows = normalized;
-    vmgListingsCache.fetchedAtMs = Date.now();
+    bucket.rows = normalized;
+    bucket.fetchedAtMs = Date.now();
     persistVmgCache();
     return {
       rows: normalized,
       source: "vmg_upstream",
-      cachedAt: new Date(vmgListingsCache.fetchedAtMs).toISOString(),
+      cachedAt: new Date(bucket.fetchedAtMs).toISOString(),
     };
   } finally {
     clearTimeout(timeout);
@@ -1856,6 +2266,7 @@ async function processCommand(commandType, payload) {
     if (!leadId) {
       throw new Error("leadId is required (or leadCorrelationId that maps to a CREATE_LEAD)");
     }
+    const approvedConsent = resolveApprovedConsent(payload, payload?._tenantContext || {});
     const request = buildCreditQuickRequest(payload, leadId);
     if (CREDIT_CHECK_MODE !== "stub") {
       throw new Error(`Unsupported CREDIT_CHECK_MODE=${CREDIT_CHECK_MODE}. Configure provider adapter or set stub.`);
@@ -1873,6 +2284,7 @@ async function processCommand(commandType, payload) {
       decision: decisionForBand(band),
       providerCode: "000",
       providerRef: `stub_${uuidv4()}`,
+      consentId: approvedConsent.consentId,
       request,
       response: {
         response_status: "Success",
@@ -2367,6 +2779,7 @@ async function processCommand(commandType, payload) {
       result.leadId = credit.leadId;
       result.provider = credit.provider;
       result.mode = credit.mode;
+      result.consentId = credit.consentId || String(payload?.consentId || "").trim() || null;
       result.creditCheck = {
         score: credit.score,
         band: credit.band,
@@ -2374,6 +2787,17 @@ async function processCommand(commandType, payload) {
         providerCode: credit.providerCode,
         providerRef: credit.providerRef,
       };
+      if (result.consentId && consentRecords.has(result.consentId)) {
+        const rec = consentRecords.get(result.consentId);
+        rec.usedAt = new Date().toISOString();
+        rec.creditCheckCorrelationId = String(payload?._commandCorrelationId || "");
+        rec.updatedAt = new Date().toISOString();
+        consentRecords.set(rec.consentId, rec);
+        appendConsentEvent(rec.consentId, "used_for_credit_check", {
+          leadId: result.leadId,
+        });
+        persistStore();
+      }
       result.creditCheckDebug = {
         request: credit.request,
         response: credit.response,
@@ -2386,6 +2810,25 @@ async function processCommand(commandType, payload) {
       result.leadId = leadId;
       result.shareId = `share_${uuidv4()}`;
       result.shareTarget = payload?.target || payload?.shareTarget || "UNKNOWN";
+      return result;
+    }
+    case "LOG_COMMUNICATION": {
+      const leadId = resolveLeadId(payload);
+      if (!leadId) throw new Error("leadId is required (or leadCorrelationId that maps to a CREATE_LEAD)");
+      const provider = resolveCrmProvider(payload?._tenantContext || {});
+      const providerPayload = {
+        ...payload,
+        path: `/leads/leads/${leadId}`,
+        entityId: String(leadId),
+      };
+      const communication = await provider.logCommunication({
+        ...providerPayload,
+        leadId,
+        _serverNowIso: now,
+      });
+      result.leadId = leadId;
+      result.provider = provider.providerName || "EvolveSA";
+      result.communication = communication || {};
       return result;
     }
     case "CREATE_STOCK_UNIT": {
@@ -2516,16 +2959,19 @@ async function processCommand(commandType, payload) {
       let fetched;
       try {
         fetched = useVmgFeed
-          ? await fetchVmgListingsCached(false)
+          ? await fetchVmgListingsCached(false, dealerScope)
           : await fetchAutoTraderListingsCached(false);
       } catch (e) {
         fetched = {
           rows: useVmgFeed
-            ? (Array.isArray(vmgListingsCache.rows) ? vmgListingsCache.rows : [])
+            ? vmgCachedRowsForDealerScope(dealerScope)
             : (Array.isArray(autoTraderListingsCache.rows) ? autoTraderListingsCache.rows : []),
           source: "cache_only_on_error",
           cachedAt: useVmgFeed
-            ? (vmgListingsCache.fetchedAtMs ? new Date(vmgListingsCache.fetchedAtMs).toISOString() : null)
+            ? (() => {
+                const b = getVmgListingsBucket(resolveVmgStockFeedUrl(dealerScope));
+                return b.fetchedAtMs ? new Date(b.fetchedAtMs).toISOString() : null;
+              })()
             : (autoTraderListingsCache.fetchedAtMs ? new Date(autoTraderListingsCache.fetchedAtMs).toISOString() : null),
         };
         result.stockLookupWarning = e?.message || String(e);
@@ -3003,14 +3449,14 @@ app.get("/api/v1/stocks", requireAuth, extractTenantContext, async (req, res) =>
     let fetched;
     try {
       fetched = useVmgFeed
-        ? await fetchVmgListingsCached(forceRefresh)
+        ? await fetchVmgListingsCached(forceRefresh, dealerScope)
         : await fetchAutoTraderListingsCached(forceRefresh);
     } catch (refreshErr) {
       if (!forceRefresh) throw refreshErr;
       // Upstream can intermittently fail on forced refresh.
       // Serve last known cache instead of hard-failing stock lookup in the app.
       fetched = useVmgFeed
-        ? await fetchVmgListingsCached(false)
+        ? await fetchVmgListingsCached(false, dealerScope)
         : await fetchAutoTraderListingsCached(false);
       log("warn", "stock_refresh_failed_serving_cache", {
         error: refreshErr?.message || String(refreshErr),
@@ -3066,8 +3512,12 @@ app.get("/api/v1/stocks", requireAuth, extractTenantContext, async (req, res) =>
     // Last-resort fallback: if we have any cached rows in memory, serve them instead of 502.
     const dealerScopeForProvider = String(req.tenantContext?.dealerId || "").trim();
     const useVmgFeed = useVmgFeedForDealer(dealerScopeForProvider);
-    const providerCacheRows = useVmgFeed ? vmgListingsCache.rows : autoTraderListingsCache.rows;
-    const providerFetchedAtMs = useVmgFeed ? vmgListingsCache.fetchedAtMs : autoTraderListingsCache.fetchedAtMs;
+    const providerCacheRows = useVmgFeed
+      ? vmgCachedRowsForDealerScope(dealerScopeForProvider)
+      : autoTraderListingsCache.rows;
+    const providerFetchedAtMs = useVmgFeed
+      ? getVmgListingsBucket(resolveVmgStockFeedUrl(dealerScopeForProvider)).fetchedAtMs
+      : autoTraderListingsCache.fetchedAtMs;
     if (Array.isArray(providerCacheRows) && providerCacheRows.length > 0) {
       const search = String(req.query.search || "").trim().toLowerCase();
       const limitRaw = Number(req.query.limit || 100);
@@ -3742,6 +4192,277 @@ app.post("/api/v1/approvals/:correlationId/reject", requireAuth, extractTenantCo
   return res.json({ ok: true, correlationId, status: record.status });
 });
 
+app.post("/api/v1/consents", requireAuth, extractTenantContext, async (req, res) => {
+  try {
+    const body = isPlainObject(req.body) ? req.body : {};
+    const purpose = String(body.purpose || "").trim() || "soft_credit_check_affordability";
+    const channel = String(body.channel || "").trim().toLowerCase() || "email_link";
+    const noticeVersion = String(body.noticeVersion || "").trim();
+    const leadCorrelationId = String(body.leadCorrelationId || "").trim();
+    const leadId = String(body.leadId || "").trim();
+    const applicant = isPlainObject(body.applicant) ? body.applicant : {};
+    const email = normalizeEmail(applicant.email);
+    const mobile = String(applicant.mobile || "").trim();
+    const idNumber = String(applicant.idNumber || "").replace(/\s+/g, "");
+    const firstName = String(applicant.firstName || "").trim();
+    const surname = String(applicant.surname || applicant.lastName || "").trim();
+    const expiresInHoursRaw = Number(body.expiresInHours || CONSENT_DEFAULT_EXPIRY_HOURS);
+    const expiresInHours = Number.isFinite(expiresInHoursRaw)
+      ? Math.max(1, Math.min(168, Math.floor(expiresInHoursRaw)))
+      : CONSENT_DEFAULT_EXPIRY_HOURS;
+
+    if (!noticeVersion) {
+      return sendApiError(req, res, 400, "invalid_payload", "noticeVersion is required.");
+    }
+    if (!leadCorrelationId && !leadId) {
+      return sendApiError(req, res, 400, "invalid_payload", "leadCorrelationId or leadId is required.");
+    }
+    if (!email || !email.includes("@")) {
+      return sendApiError(req, res, 400, "invalid_payload", "applicant.email is required for email_link consent.");
+    }
+    if (!mobile || !idNumber) {
+      return sendApiError(req, res, 400, "invalid_payload", "applicant.mobile and applicant.idNumber are required.");
+    }
+    if (channel !== "email_link") {
+      return sendApiError(req, res, 400, "invalid_payload", "Only channel=email_link is supported currently.");
+    }
+    if (!String(req.tenantContext?.dealerId || "").trim()) {
+      return sendApiError(req, res, 403, "tenant_scope_missing", "Dealer scope is required to create consent.");
+    }
+
+    for (const existing of consentRecords.values()) {
+      if (String(existing.status || "").toLowerCase() !== "pending") continue;
+      if (!canAccessTenantScopedRecord(existing.tenantContext || {}, req.tenantContext || {})) continue;
+      const existingLead = String(existing.leadCorrelationId || existing.leadId || "").trim();
+      const incomingLead = String(leadCorrelationId || leadId).trim();
+      if (existingLead && incomingLead && existingLead === incomingLead && existing.purpose === purpose) {
+        return sendApiError(req, res, 409, "duplicate_pending_consent", "A pending consent already exists for this lead.");
+      }
+    }
+
+    const now = Date.now();
+    const requestedAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + expiresInHours * 60 * 60 * 1000).toISOString();
+    const consentId = `consent_${uuidv4()}`;
+    const tokenPayload = {
+      cid: consentId,
+      dealerId: String(req.tenantContext?.dealerId || "").trim(),
+      purpose,
+      nv: noticeVersion,
+      jti: `ct_${uuidv4()}`,
+      exp: Math.floor(Date.parse(expiresAt) / 1000),
+    };
+    const token = signConsentToken(tokenPayload);
+    const approveUrl = buildConsentApprovalLink(req, token);
+    const delivery = await notifyConsentEmail({
+      consentId,
+      purpose,
+      applicant: {
+        email,
+        firstName,
+        surname,
+        idNumberMasked: maskIdNumber(idNumber),
+      },
+      tenantContext: req.tenantContext || {},
+      expiresAt,
+    }, approveUrl);
+    if (!delivery.emailSent) {
+      return sendApiError(req, res, 502, "email_delivery_failed", delivery.warning || "Failed to send consent email.");
+    }
+
+    const record = {
+      consentId,
+      status: "pending",
+      purpose,
+      noticeVersion,
+      requestedAt,
+      expiresAt,
+      approvedAt: null,
+      rejectedAt: null,
+      revokedAt: null,
+      usedAt: null,
+      leadCorrelationId: leadCorrelationId || null,
+      leadId: leadId || null,
+      approvalChannel: channel,
+      applicant: {
+        firstName: firstName || null,
+        surname: surname || null,
+        idNumberMasked: maskIdNumber(idNumber),
+        email,
+        mobile,
+      },
+      tenantContext: {
+        dealerId: String(req.tenantContext?.dealerId || "").trim(),
+        branchId: String(req.tenantContext?.branchId || "").trim(),
+        userId: req.tenantContext?.userId || null,
+      },
+      requestedBy: {
+        userId: req.tenantContext?.userId || null,
+        userEmail: req.tenantContext?.userEmail || null,
+        userName: req.tenantContext?.userName || null,
+        role: req.tenantContext?.role || null,
+      },
+      requestMeta: {
+        ip: req.ip || null,
+        userAgent: req.headers["user-agent"] || null,
+      },
+      delivery: {
+        ...delivery,
+        approveUrl,
+      },
+      tokenIssuedAt: requestedAt,
+      updatedAt: requestedAt,
+    };
+
+    consentRecords.set(consentId, record);
+    appendConsentEvent(consentId, "created", {
+      dealerId: record.tenantContext.dealerId,
+      leadCorrelationId: record.leadCorrelationId,
+      leadId: record.leadId,
+      purpose,
+    });
+    appendConsentEvent(consentId, "delivery_sent", {
+      channel,
+      email,
+      providerRef: delivery.providerRef,
+    });
+    persistStore();
+
+    return res.status(201).json({
+      ok: true,
+      ...consentPublicView(record),
+    });
+  } catch (e) {
+    return sendApiError(req, res, 500, "consent_create_failed", e?.message || String(e));
+  }
+});
+
+app.get("/api/v1/consents/:consentId", requireAuth, extractTenantContext, (req, res) => {
+  const consentId = String(req.params.consentId || "").trim();
+  const record = consentRecords.get(consentId);
+  if (!record) {
+    return sendApiError(req, res, 404, "consent_not_found", "Consent was not found.");
+  }
+  if (!canAccessTenantScopedRecord(record.tenantContext || {}, req.tenantContext || {})) {
+    return sendApiError(req, res, 403, "forbidden", "Consent does not belong to current tenant scope.");
+  }
+  return res.json({
+    ok: true,
+    ...consentPublicView(record),
+  });
+});
+
+app.post("/api/v1/consents/:consentId/revoke", requireAuth, extractTenantContext, (req, res) => {
+  const consentId = String(req.params.consentId || "").trim();
+  const record = consentRecords.get(consentId);
+  if (!record) {
+    return sendApiError(req, res, 404, "consent_not_found", "Consent was not found.");
+  }
+  if (!canAccessTenantScopedRecord(record.tenantContext || {}, req.tenantContext || {})) {
+    return sendApiError(req, res, 403, "forbidden", "Consent does not belong to current tenant scope.");
+  }
+  const status = String(record.status || "").toLowerCase();
+  if (status === "revoked") {
+    return res.json({ ok: true, ...consentPublicView(record) });
+  }
+  if (status !== "pending" && status !== "approved") {
+    return sendApiError(req, res, 409, "consent_not_revocable", `Consent in state ${record.status} cannot be revoked.`);
+  }
+  const nowIso = new Date().toISOString();
+  record.status = "revoked";
+  record.revokedAt = nowIso;
+  record.updatedAt = nowIso;
+  record.revokeReason = String(req.body?.reason || "").trim() || null;
+  consentRecords.set(consentId, record);
+  appendConsentEvent(consentId, "revoked", {
+    byUserId: req.tenantContext?.userId || null,
+    byUserEmail: req.tenantContext?.userEmail || null,
+    reason: record.revokeReason,
+  });
+  persistStore();
+  return res.json({ ok: true, ...consentPublicView(record) });
+});
+
+app.get("/consent/approve", (req, res) => {
+  const token = String(req.query.token || "").trim();
+  if (!token) {
+    return res.status(400).send("Missing token.");
+  }
+  try {
+    const decoded = verifyConsentToken(token);
+    const consentId = String(decoded?.cid || "").trim();
+    const record = consentRecords.get(consentId);
+    if (!record) return res.status(404).send("Consent not found.");
+    const nowMs = Date.now();
+    if (record.expiresAt && Date.parse(record.expiresAt) <= nowMs) {
+      return res.status(410).send("Consent link has expired.");
+    }
+    return res.status(200).send(
+      `<html><body><h3>Credit consent approval</h3><p>Consent ID: ${consentId}</p><p>Status: ${String(record.status || "")}</p>` +
+      `<form method="post" action="/consent/approve"><input type="hidden" name="token" value="${token}" />` +
+      `<button type="submit" name="decision" value="approve">Approve</button>` +
+      `<button type="submit" name="decision" value="reject">Reject</button></form></body></html>`
+    );
+  } catch (e) {
+    return res.status(400).send("Invalid or expired token.");
+  }
+});
+
+app.post("/consent/approve", (req, res) => {
+  try {
+    const token = String(req.body?.token || "").trim();
+    const decision = String(req.body?.decision || "").trim().toLowerCase();
+    if (!token) return res.status(400).json({ ok: false, error: "invalid_token" });
+    if (decision !== "approve" && decision !== "reject") {
+      return res.status(400).json({ ok: false, error: "invalid_decision" });
+    }
+    const decoded = verifyConsentToken(token);
+    const consentId = String(decoded?.cid || "").trim();
+    const record = consentRecords.get(consentId);
+    if (!record) return res.status(404).json({ ok: false, error: "consent_not_found" });
+    const status = String(record.status || "").toLowerCase();
+    if (status !== "pending") {
+      return res.status(409).json({ ok: false, error: "consent_already_finalized", status: record.status });
+    }
+    const nowIso = new Date().toISOString();
+    if (record.expiresAt && Date.parse(record.expiresAt) <= Date.now()) {
+      record.status = "expired";
+      record.updatedAt = nowIso;
+      consentRecords.set(consentId, record);
+      appendConsentEvent(consentId, "expired", {});
+      persistStore();
+      return res.status(410).json({ ok: false, error: "consent_expired" });
+    }
+    record.status = decision === "approve" ? "approved" : "rejected";
+    if (decision === "approve") record.approvedAt = nowIso;
+    if (decision === "reject") record.rejectedAt = nowIso;
+    record.approvalMeta = {
+      ip: req.ip || null,
+      userAgent: req.headers["user-agent"] || null,
+      approvedFromPublicLink: true,
+    };
+    record.updatedAt = nowIso;
+    consentRecords.set(consentId, record);
+    appendConsentEvent(consentId, decision === "approve" ? "approved" : "rejected", {
+      ip: req.ip || null,
+      userAgent: req.headers["user-agent"] || null,
+    });
+    persistStore();
+    return res.json({
+      ok: true,
+      ...consentPublicView(record),
+    });
+  } catch (e) {
+    const raw = String(e?.message || e || "");
+    const status = raw.includes("expired") ? 410 : 400;
+    return res.status(status).json({
+      ok: false,
+      error: raw.includes("expired") ? "token_expired" : "invalid_token",
+      detail: raw,
+    });
+  }
+});
+
 app.post("/api/v1/commands", requireAuth, extractTenantContext, async (req, res) => {
   const normalized = normalizeCommandBody(req.body);
   if (normalized?.error) {
@@ -3804,7 +4525,11 @@ app.post("/api/v1/commands", requireAuth, extractTenantContext, async (req, res)
   // Fast paths for live UX: process valuation and stock take immediately.
   if (commandType === VALUATION_COMMAND || commandType === "STOCK_TAKE") {
     try {
-      const result = await processCommand(commandType, { ...payload, _tenantContext: req.tenantContext || null });
+      const result = await processCommand(commandType, {
+        ...payload,
+        _tenantContext: req.tenantContext || null,
+        _commandCorrelationId: correlationId,
+      });
       return res.status(200).json({
         correlationId,
         status: "done",
@@ -3852,7 +4577,11 @@ app.post("/api/v1/commands", requireAuth, extractTenantContext, async (req, res)
         record.updatedAt = new Date().toISOString();
         createOrUpdateCommand(record);
 
-        const result = await processCommand(commandType, { ...payload, _tenantContext: record.tenantContext || null });
+        const result = await processCommand(commandType, {
+          ...payload,
+          _tenantContext: record.tenantContext || null,
+          _commandCorrelationId: record.correlationId,
+        });
 
         record.status = "done";
         record.updatedAt = new Date().toISOString();
