@@ -2,6 +2,8 @@ package com.cubeone.scan.services
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.cubeone.scan.BuildConfig
+import com.cubeone.scan.R
 
 object ApiConfig {
     private const val PREFS_NAME = "cubeone_connector_prefs"
@@ -15,12 +17,22 @@ object ApiConfig {
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    /** Dealer / pilot APK: URLs and API key baked in at release build; not shown in Settings. */
+    private fun lockedConnectorConfig(): Boolean = BuildConfig.LOCK_CONNECTOR_CONFIG
+
     fun getBaseUrl(context: Context): String {
-        val raw = prefs(context).getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
+        if (lockedConnectorConfig() && BuildConfig.LOCKED_CONNECTOR_BASE_URL.isNotBlank()) {
+            return normalizeBaseUrl(BuildConfig.LOCKED_CONNECTOR_BASE_URL)
+        }
+        val saved = prefs(context).getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
+        val raw = saved.trim().ifBlank { context.getString(R.string.default_connector_base_url).trim() }
         return normalizeBaseUrl(raw)
     }
 
     fun getApiKey(context: Context): String {
+        if (lockedConnectorConfig() && BuildConfig.LOCKED_CONNECTOR_API_KEY.isNotBlank()) {
+            return BuildConfig.LOCKED_CONNECTOR_API_KEY
+        }
         return prefs(context).getString(KEY_API_KEY, DEFAULT_API_KEY) ?: DEFAULT_API_KEY
     }
 
@@ -29,11 +41,16 @@ object ApiConfig {
      * When blank, [com.cubeone.scan.core.auth.AuthApiService] derives auth from the connector URL (port 4000).
      */
     fun getAuthBaseUrl(context: Context): String {
-        val raw = prefs(context).getString(KEY_AUTH_BASE_URL, "") ?: ""
+        if (lockedConnectorConfig() && BuildConfig.LOCKED_AUTH_BASE_URL.isNotBlank()) {
+            return normalizeBaseUrl(BuildConfig.LOCKED_AUTH_BASE_URL)
+        }
+        val saved = prefs(context).getString(KEY_AUTH_BASE_URL, "") ?: ""
+        val raw = saved.trim().ifBlank { context.getString(R.string.default_auth_base_url).trim() }
         return normalizeBaseUrl(raw)
     }
 
     fun setConfig(context: Context, baseUrl: String, apiKey: String, authBaseUrl: String? = null) {
+        if (lockedConnectorConfig()) return
         val editor = prefs(context).edit()
             .putString(KEY_BASE_URL, normalizeBaseUrl(baseUrl))
             .putString(KEY_API_KEY, apiKey.trim())

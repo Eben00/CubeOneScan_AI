@@ -1,18 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item>
-        <shape android:shape="oval">
-            <solid android:color="#0A7A63" />
-        </shape>
-    </item>
-    <item android:insetLeft="14dp" android:insetTop="14dp" android:insetRight="14dp" android:insetBottom="14dp">
-        <shape android:shape="oval">
-            <solid android:color="#FFFFFF" />
-        </shape>
-    </item>
-    <item android:insetLeft="24dp" android:insetTop="24dp" android:insetRight="24dp" android:insetBottom="24dp">
-        <shape android:shape="oval">
-            <solid android:color="#0A7A63" />
-        </shape>
-    </item>
-</layer-list>
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
+    android:src="@drawable/evolvesa_logo"
+    android:gravity="center" />

@@ -1,0 +1,2 @@
+# Optional: generate APK install QR (PNG)
+qrcode[pil]>=7.4.2

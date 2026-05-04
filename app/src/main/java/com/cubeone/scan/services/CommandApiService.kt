@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
 import android.util.Log
+import com.cubeone.scan.R
 import com.cubeone.scan.core.auth.AuthStore
 import org.json.JSONArray
 import org.json.JSONObject
@@ -15,8 +16,15 @@ import java.net.URL
 
 object CommandApiService {
     private const val TAG = "CommandApiService"
+    /** Connector sends email synchronously on POST /consents; SMTP (e.g. Brevo) often exceeds 20s. */
+    private const val READ_TIMEOUT_MS_CONSENT = 120_000
     private const val QUEUE_PREFS = "command_api_queue"
     private const val QUEUE_KEY = "queued_commands"
+    private const val HEALTH_PREFS = "command_api_health"
+    private const val HEALTH_LAST_ERROR = "last_error"
+    private const val HEALTH_LAST_UPDATE_MS = "last_update_ms"
+    private const val HEALTH_LAST_FLUSH_SENT = "last_flush_sent"
+    private const val HEALTH_LAST_FLUSH_REMAINING = "last_flush_remaining"
 
     data class CreateCommandResponse(
         val correlationId: String,
@@ -86,6 +94,30 @@ object CommandApiService {
         val json: JSONObject
     )
 
+    data class ConsentStatusResponse(
+        val consentId: String,
+        val status: String,
+        val purpose: String?,
+        val noticeVersion: String?,
+        val requestedAt: String?,
+        val expiresAt: String?,
+        val approvedAt: String?,
+        val rejectedAt: String?,
+        val revokedAt: String?,
+        val leadCorrelationId: String?,
+        val leadId: String?,
+        val approvalChannel: String?,
+        val raw: JSONObject
+    )
+
+    data class CommandHealthSnapshot(
+        val queuedCount: Int,
+        val lastError: String?,
+        val lastFlushSent: Int,
+        val lastFlushRemaining: Int,
+        val updatedAtMs: Long
+    )
+
     private data class QueuedCommand(
         val commandType: String,
         val correlationId: String?,
@@ -139,6 +171,59 @@ object CommandApiService {
         )
     }
 
+    private fun healthPrefs(context: Context): SharedPreferences =
+        context.getSharedPreferences(HEALTH_PREFS, Context.MODE_PRIVATE)
+
+    private fun saveHealthError(context: Context, message: String?) {
+        val editor = healthPrefs(context).edit()
+        if (message.isNullOrBlank()) editor.remove(HEALTH_LAST_ERROR) else editor.putString(HEALTH_LAST_ERROR, message)
+        editor.putLong(HEALTH_LAST_UPDATE_MS, System.currentTimeMillis())
+        editor.apply()
+    }
+
+    private fun saveHealthFlush(context: Context, sent: Int, remaining: Int) {
+        healthPrefs(context).edit()
+            .putInt(HEALTH_LAST_FLUSH_SENT, sent)
+            .putInt(HEALTH_LAST_FLUSH_REMAINING, remaining)
+            .putLong(HEALTH_LAST_UPDATE_MS, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun getCommandHealthSnapshot(context: Context): CommandHealthSnapshot {
+        val hp = healthPrefs(context)
+        return CommandHealthSnapshot(
+            queuedCount = getQueuedCommandCount(context),
+            lastError = hp.getString(HEALTH_LAST_ERROR, null),
+            lastFlushSent = hp.getInt(HEALTH_LAST_FLUSH_SENT, 0),
+            lastFlushRemaining = hp.getInt(HEALTH_LAST_FLUSH_REMAINING, 0),
+            updatedAtMs = hp.getLong(HEALTH_LAST_UPDATE_MS, 0L)
+        )
+    }
+
+    private fun normalizeErrorText(raw: String): String {
+        val text = raw.trim()
+        if (text.isBlank()) return "Request failed. Please try again."
+        if (text.contains("Cannot GET", ignoreCase = true) || text.contains("<!DOCTYPE html>", ignoreCase = true)) {
+            return "Feature not available on this connector yet. Please deploy latest backend."
+        }
+        if (text.contains("HTTP 401")) return "Authentication failed. Check API key and sign in again."
+        if (text.contains("HTTP 403")) {
+            val hint = text.substringAfter("\n\n").trim().lineSequence().firstOrNull()?.trim().orEmpty()
+            return if (hint.isNotBlank()) {
+                "Access denied: $hint Check USER_EMAIL_DEALER_MAP / dealer id on the connector (Render env)."
+            } else {
+                "Access denied for this dealer/user. Check tenant mapping and login account."
+            }
+        }
+        if (text.contains("HTTP 404")) return "Requested endpoint or record not found on the connector."
+        if (text.contains("HTTP 5")) return "Connector is temporarily unavailable. Command can be retried."
+        if (text.contains("timeout", ignoreCase = true)) return "Request timed out. Check network and retry."
+        if (text.contains("UnknownHost", ignoreCase = true) || text.contains("failed to connect", ignoreCase = true)) {
+            return "Cannot reach connector host. Verify Base URL and network."
+        }
+        return text.lineSequence().firstOrNull()?.trim().orEmpty().ifBlank { text }
+    }
+
 
     fun createCommand(
         context: Context,
@@ -152,19 +237,26 @@ object CommandApiService {
             try {
                 val result = sendCommandBlocking(context, commandType, correlationId, payload)
                 if (result.response != null) {
+                    saveHealthError(context, null)
                     onSuccess(result.response)
                     return@Thread
                 }
                 if (result.shouldQueue) {
                     enqueueCommand(context, QueuedCommand(commandType, correlationId, payload, System.currentTimeMillis()))
-                    onError("No connection right now. Command queued offline and will be retried.")
+                    val msg = "No connection right now. Command queued offline and will be retried."
+                    saveHealthError(context, msg)
+                    onError(msg)
                     return@Thread
                 }
-                onError(result.errorText ?: "Unknown error")
+                val msg = normalizeErrorText(result.errorText ?: "Unknown error")
+                saveHealthError(context, msg)
+                onError(msg)
             } catch (e: Exception) {
                 Log.e(TAG, "createCommand failed", e)
                 enqueueCommand(context, QueuedCommand(commandType, correlationId, payload, System.currentTimeMillis()))
-                onError("No connection right now. Command queued offline and will be retried.")
+                val msg = "No connection right now. Command queued offline and will be retried."
+                saveHealthError(context, msg)
+                onError(msg)
             }
         }.start()
     }
@@ -194,7 +286,7 @@ object CommandApiService {
                 val responseBody = readBody(conn)
 
                 if (code !in 200..299) {
-                    onError("HTTP $code: $responseBody")
+                    onError(normalizeErrorText("HTTP $code: $responseBody"))
                     return@Thread
                 }
 
@@ -212,7 +304,7 @@ object CommandApiService {
                 onSuccess(resp)
             } catch (e: Exception) {
                 Log.e(TAG, "getCommandStatus failed", e)
-                onError(e.message ?: "Unknown error")
+                onError(normalizeErrorText(e.message ?: "Unknown error"))
             }
         }.start()
     }
@@ -271,7 +363,7 @@ object CommandApiService {
                 val code = conn.responseCode
                 val body = readBody(conn)
                 if (code !in 200..299) {
-                    onError("HTTP $code\n\n$body")
+                    onError(normalizeErrorText("HTTP $code\n\n$body"))
                     return@Thread
                 }
                 val json = JSONObject(body.ifEmpty { "{}" })
@@ -294,7 +386,7 @@ object CommandApiService {
                 }
                 onSuccess(list)
             } catch (e: Exception) {
-                onError(e.message ?: "Failed to load approvals")
+                onError(normalizeErrorText(e.message ?: "Failed to load approvals"))
             }
         }.start()
     }
@@ -347,7 +439,7 @@ object CommandApiService {
                 val code = conn.responseCode
                 val body = readBody(conn)
                 if (code !in 200..299) {
-                    onError("HTTP $code\n\n$body")
+                    onError(normalizeErrorText("HTTP $code\n\n$body"))
                     return@Thread
                 }
                 val json = JSONObject(body.ifEmpty { "{}" })
@@ -386,12 +478,76 @@ object CommandApiService {
                     )
                 )
             } catch (e: Exception) {
-                onError(e.message ?: "Failed to load stocks")
+                onError(normalizeErrorText(e.message ?: "Failed to load stocks"))
             }
         }.start()
     }
 
     fun getQueuedCommandCount(context: Context): Int = loadQueue(context).size
+
+    fun createConsent(
+        context: Context,
+        payload: JSONObject,
+        onSuccess: (ConsentStatusResponse) -> Unit,
+        onError: (String) -> Unit
+    ) = postJson(
+        context = context,
+        path = "/api/v1/consents",
+        body = payload,
+        onSuccess = { json ->
+            try {
+                onSuccess(parseConsentStatus(json))
+            } catch (e: Exception) {
+                onError(normalizeErrorText(e.message ?: "Invalid consent response"))
+            }
+        },
+        onError = onError,
+        readTimeoutMs = READ_TIMEOUT_MS_CONSENT
+    )
+
+    fun getConsentStatus(
+        context: Context,
+        consentId: String,
+        onSuccess: (ConsentStatusResponse) -> Unit,
+        onError: (String) -> Unit
+    ) = getJson(
+        context = context,
+        path = "/api/v1/consents/$consentId",
+        onSuccess = { json ->
+            try {
+                onSuccess(parseConsentStatus(json))
+            } catch (e: Exception) {
+                onError(normalizeErrorText(e.message ?: "Invalid consent response"))
+            }
+        },
+        onError = onError
+    )
+
+    fun revokeConsent(
+        context: Context,
+        consentId: String,
+        reason: String?,
+        onSuccess: (ConsentStatusResponse) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val body = JSONObject().apply {
+            if (!reason.isNullOrBlank()) put("reason", reason.trim())
+        }
+        postJson(
+            context = context,
+            path = "/api/v1/consents/$consentId/revoke",
+            body = body,
+            onSuccess = { json ->
+                try {
+                    onSuccess(parseConsentStatus(json))
+                } catch (e: Exception) {
+                    onError(normalizeErrorText(e.message ?: "Invalid consent response"))
+                }
+            },
+            onError = onError,
+            readTimeoutMs = READ_TIMEOUT_MS_CONSENT
+        )
+    }
 
     fun getKpis(
         context: Context,
@@ -455,6 +611,7 @@ object CommandApiService {
         Thread {
             val queue = loadQueue(context).toMutableList()
             if (queue.isEmpty()) {
+                saveHealthFlush(context, 0, 0)
                 onDone?.invoke(0, 0)
                 return@Thread
             }
@@ -477,6 +634,8 @@ object CommandApiService {
                 saveQueue(context, queue)
                 onProgress?.invoke(queue.size)
             }
+            saveHealthFlush(context, sent, queue.size)
+            if (queue.isEmpty()) saveHealthError(context, null)
             onDone?.invoke(sent, queue.size)
         }.start()
     }
@@ -513,12 +672,14 @@ object CommandApiService {
             val code = conn.responseCode
             val responseBody = readBody(conn)
             if (code == 401) {
-                return SendResult(errorText = "API key rejected (401). In CubeOneScan Settings, set API Key exactly to API_KEY in connector .env on your PC.")
+                return SendResult(errorText = context.getString(R.string.api_key_rejected_message))
             }
             if (code != 202 && code != 200) {
                 val detail = try {
                     val jo = JSONObject(responseBody.ifEmpty { "{}" })
-                    jo.optString("error", "").ifBlank { responseBody }
+                    val err = jo.optString("error", "").trim()
+                    val hint = jo.optString("hint", "").trim()
+                    listOf(err, hint).filter { it.isNotEmpty() }.joinToString(" — ").ifBlank { responseBody }
                 } catch (_: Exception) {
                     responseBody
                 }
@@ -610,12 +771,12 @@ object CommandApiService {
                 val code = conn.responseCode
                 val resp = readBody(conn)
                 if (code !in 200..299) {
-                    onError("HTTP $code\n\n$resp")
+                    onError(normalizeErrorText("HTTP $code\n\n$resp"))
                     return@Thread
                 }
                 onSuccess()
             } catch (e: Exception) {
-                onError(e.message ?: "Action failed")
+                onError(normalizeErrorText(e.message ?: "Action failed"))
             }
         }.start()
     }
@@ -628,10 +789,10 @@ object CommandApiService {
     ) {
         Thread {
             try {
-                val json = requestJson(context, "GET", path, null)
+                val json = requestJson(context, "GET", path, null, 20_000)
                 onSuccess(json)
             } catch (e: Exception) {
-                onError(e.message ?: "Request failed")
+                onError(normalizeErrorText(e.message ?: "Request failed"))
             }
         }.start()
     }
@@ -641,14 +802,15 @@ object CommandApiService {
         path: String,
         body: JSONObject,
         onSuccess: (JSONObject) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        readTimeoutMs: Int = 20_000
     ) {
         Thread {
             try {
-                val json = requestJson(context, "POST", path, body)
+                val json = requestJson(context, "POST", path, body, readTimeoutMs)
                 onSuccess(json)
             } catch (e: Exception) {
-                onError(e.message ?: "Request failed")
+                onError(normalizeErrorText(e.message ?: "Request failed"))
             }
         }.start()
     }
@@ -662,10 +824,10 @@ object CommandApiService {
     ) {
         Thread {
             try {
-                val json = requestJson(context, "PUT", path, body)
+                val json = requestJson(context, "PUT", path, body, 20_000)
                 onSuccess(json)
             } catch (e: Exception) {
-                onError(e.message ?: "Request failed")
+                onError(normalizeErrorText(e.message ?: "Request failed"))
             }
         }.start()
     }
@@ -674,7 +836,8 @@ object CommandApiService {
         context: Context,
         method: String,
         path: String,
-        body: JSONObject?
+        body: JSONObject?,
+        readTimeoutMs: Int = 20_000
     ): JSONObject {
         val baseUrl = ApiConfig.getBaseUrl(context)
         val apiKey = ApiConfig.getApiKey(context)
@@ -687,7 +850,7 @@ object CommandApiService {
         AuthStore.getDealerId(context)?.let { conn.setRequestProperty("X-Dealer-Id", it) }
         AuthStore.getBranchId(context)?.let { conn.setRequestProperty("X-Branch-Id", it) }
         conn.connectTimeout = 10_000
-        conn.readTimeout = 20_000
+        conn.readTimeout = readTimeoutMs
         if (body != null) {
             conn.doOutput = true
             conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
@@ -696,6 +859,24 @@ object CommandApiService {
         val resp = readBody(conn)
         if (code !in 200..299) throw IllegalStateException("HTTP $code: $resp")
         return JSONObject(resp.ifEmpty { "{}" })
+    }
+
+    private fun parseConsentStatus(json: JSONObject): ConsentStatusResponse {
+        return ConsentStatusResponse(
+            consentId = json.optString("consentId").ifBlank { json.optString("id") },
+            status = json.optString("status"),
+            purpose = json.optString("purpose").ifBlank { null },
+            noticeVersion = json.optString("noticeVersion").ifBlank { null },
+            requestedAt = json.optString("requestedAt").ifBlank { null },
+            expiresAt = json.optString("expiresAt").ifBlank { null },
+            approvedAt = json.optString("approvedAt").ifBlank { null },
+            rejectedAt = json.optString("rejectedAt").ifBlank { null },
+            revokedAt = json.optString("revokedAt").ifBlank { null },
+            leadCorrelationId = json.optString("leadCorrelationId").ifBlank { null },
+            leadId = json.optString("leadId").ifBlank { null },
+            approvalChannel = json.optString("approvalChannel").ifBlank { null },
+            raw = json
+        )
     }
 
 

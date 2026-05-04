@@ -8,6 +8,82 @@ function formatEvolvesaLocalDateTime(d) {
   return `${yyyy}-${mm}-${dd} ${HH}:${MM}:${SS}`;
 }
 
+function normalizeWhitespace(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Node's undici fetch often throws only "fetch failed"; err.cause has ENOTFOUND, ECONNREFUSED, etc.
+ */
+function enrichEvolvesaFetchError(err, operationLabel) {
+  if (!err) return new Error(`EvolveSA ${operationLabel}: unknown error`);
+  const msg = String(err.message || err);
+  if (err.name === "AbortError") {
+    return new Error(
+      `EvolveSA ${operationLabel} timed out (no response in time). Check CRM availability or connector timeout.`,
+      { cause: err }
+    );
+  }
+  const cause = err.cause;
+  const code = cause && cause.code != null ? String(cause.code) : "";
+  const causeMsg = cause && (cause.message || String(cause)) ? String(cause.message || cause) : "";
+  const isFetchFailed = msg === "fetch failed" || /fetch failed/i.test(msg);
+  const networkish =
+    isFetchFailed ||
+    code === "ENOTFOUND" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code === "CERT_HAS_EXPIRED" ||
+    (causeMsg && /cert|ssl|tls|handshake|UNABLE_TO_VERIFY/i.test(causeMsg));
+
+  if (!networkish) return err;
+
+  const detail = [code, causeMsg].filter(Boolean).join(" — ") || msg;
+  const hint =
+    code === "ENOTFOUND"
+      ? "DNS did not resolve — verify EVOLVESA_BASE_URL or EVOLVESA_LEAD_TRIGGER_URL hostname from the connector host."
+      : code === "ECONNREFUSED"
+        ? "Connection refused — wrong host/port, CRM down, or firewall blocking the connector server."
+        : code === "ECONNRESET" || code === "ETIMEDOUT"
+          ? "Connection dropped or timed out — unstable network, VPN, or firewall between connector and CRM."
+          : causeMsg && /cert|ssl|tls|handshake|UNABLE_TO_VERIFY/i.test(causeMsg)
+            ? "TLS/certificate problem — trust store, expired cert, or HTTPS proxy."
+            : "Connector could not complete HTTPS to EvolveSA (path from server to CRM).";
+
+  return new Error(`EvolveSA ${operationLabel} failed (${detail}). ${hint}`, { cause: err });
+}
+
+function resolveLeadNames(payload) {
+  const dl = payload?.driverLicense || payload?.lead || {};
+  const combinedCandidate = normalizeWhitespace(dl?.name || payload?.name || "");
+  let firstName = normalizeWhitespace(dl?.firstName || dl?.NAMES || payload?.firstName || "");
+  let lastName = normalizeWhitespace(dl?.lastName || dl?.SURNAME || dl?.surname || payload?.lastName || payload?.surname || "");
+
+  if ((!firstName || !lastName) && combinedCandidate) {
+    const parts = combinedCandidate.split(" ").filter(Boolean);
+    if (parts.length >= 2) {
+      if (!lastName) lastName = parts[parts.length - 1];
+      if (!firstName) firstName = parts.slice(0, -1).join(" ");
+    } else if (!firstName) {
+      firstName = parts[0] || "";
+    }
+  }
+
+  if (firstName && lastName && firstName.toLowerCase() === lastName.toLowerCase() && combinedCandidate) {
+    const parts = combinedCandidate.split(" ").filter(Boolean);
+    if (parts.length >= 2) {
+      firstName = parts.slice(0, -1).join(" ");
+      lastName = parts[parts.length - 1];
+    }
+  }
+
+  const fullName = normalizeWhitespace(`${firstName} ${lastName}`) || combinedCandidate || "Customer";
+  return { firstName, lastName, fullName };
+}
+
 function createEvolvesaProvider(deps) {
   const {
     fetchImpl,
@@ -35,7 +111,17 @@ function createEvolvesaProvider(deps) {
     leadSourceId,
     defaultLeadAncillaryArea,
     defaultLeadUserArea,
+    communicationEndpoint,
   } = config;
+
+  async function evolveFetch(operationLabel, fn) {
+    try {
+      return await fn();
+    } catch (err) {
+      const wrapped = enrichEvolvesaFetchError(err, operationLabel);
+      throw wrapped;
+    }
+  }
 
   function resolveLeadReceivingEntity(tenantDealerId) {
     const dealerId = canonicalDealerId(tenantDealerId);
@@ -86,9 +172,7 @@ function createEvolvesaProvider(deps) {
 
     const ancillaryArea = dl?.area || payload?.area || defaultLeadAncillaryArea;
     const userArea = payload?.userArea || dl?.userArea || defaultLeadUserArea;
-    const firstName = dl?.firstName || dl?.NAMES || "";
-    const lastName = dl?.lastName || dl?.SURNAME || dl?.surname || "";
-    const fullName = `${firstName} ${lastName}`.trim() || dl?.name || payload?.name || "Customer";
+    const { firstName, lastName, fullName } = resolveLeadNames(payload);
 
     const phone = dl?.phone || dl?.mobile || payload?.phone || "";
     const email = dl?.email || payload?.email || "";
@@ -135,7 +219,9 @@ function createEvolvesaProvider(deps) {
           payload?.message ||
           `Lead created from ${leadSource}. Dealer=${tenant?.dealerId || ""} Branch=${tenant?.branchId || ""}${idNumber ? ` ID=${idNumber}` : ""}`,
         "mobile-number": phone,
-        name: fullName,
+        name: firstName || fullName,
+        ...(lastName ? { surname: lastName } : {}),
+        ...(fullName ? { "full-name": fullName } : {}),
         ...(createdByUserId ? { "assigned-to-user-id": String(createdByUserId) } : {}),
         ...(createdByName ? { "assigned-to-name": String(createdByName) } : {}),
         ...(createdByEmail ? { "assigned-to-email": String(createdByEmail) } : {}),
@@ -154,12 +240,14 @@ function createEvolvesaProvider(deps) {
       const authHeaderValue = evolveAuthHeaderValue();
       if (authHeaderValue) headers.Authorization = authHeaderValue;
 
-      const response = await fetchImpl(resolvedTriggerUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
-      });
+      const response = await evolveFetch("create lead (trigger POST)", () =>
+        fetchImpl(resolvedTriggerUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        })
+      );
 
       const text = await response.text();
       let json = null;
@@ -246,16 +334,18 @@ function createEvolvesaProvider(deps) {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const body = toEvolveLeadPayload(payload);
-      const response = await fetchImpl(`${baseUrl}/api/v1/leads`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          Authorization: evolveAuthHeaderValue(),
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      const response = await evolveFetch("create lead (API POST)", () =>
+        fetchImpl(`${baseUrl}/api/v1/leads`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            Authorization: evolveAuthHeaderValue(),
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        })
+      );
       const text = await response.text();
       let json = null;
       try {
@@ -303,12 +393,14 @@ function createEvolvesaProvider(deps) {
         };
         const authHeaderValue = evolveAuthHeaderValue();
         if (authHeaderValue) headers.Authorization = authHeaderValue;
-        const response = await fetchImpl(stockTriggerUrl, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        });
+        const response = await evolveFetch("create stock (trigger POST)", () =>
+          fetchImpl(stockTriggerUrl, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          })
+        );
         const text = await response.text();
         let json = null;
         try {
@@ -358,16 +450,18 @@ function createEvolvesaProvider(deps) {
     try {
       const body = toEvolveStockPayload(payload);
       const endpoint = stockEndpoint.startsWith("/") ? stockEndpoint : `/${stockEndpoint}`;
-      const response = await fetchImpl(`${baseUrl}${endpoint}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          Authorization: evolveAuthHeaderValue(),
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      const response = await evolveFetch("create stock (API POST)", () =>
+        fetchImpl(`${baseUrl}${endpoint}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            Authorization: evolveAuthHeaderValue(),
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        })
+      );
       const text = await response.text();
       let json = null;
       try {
@@ -402,10 +496,133 @@ function createEvolvesaProvider(deps) {
     }
   }
 
+  function resolveCommunicationUrl(leadId, pathValue) {
+    const custom = String(communicationEndpoint || "").trim();
+    if (custom) {
+      try {
+        return new URL(custom, baseUrl).toString();
+      } catch (_) {
+        return custom;
+      }
+    }
+    const p = String(pathValue || `/leads/leads/${leadId}`).trim();
+    try {
+      return new URL(p, baseUrl).toString();
+    } catch (_) {
+      return `${baseUrl}${p.startsWith("/") ? p : `/${p}`}`;
+    }
+  }
+
+  async function logCommunication(payload) {
+    const tenant = payload?._tenantContext || {};
+    const leadId = String(payload?.leadId || "").trim();
+    if (!leadId) {
+      throw new Error("leadId is required for communication logging");
+    }
+    const content = String(payload?.comment?.content || payload?.content || "").trim();
+    if (!content) {
+      throw new Error("communication content is required");
+    }
+
+    const nowIso = String(payload?._serverNowIso || new Date().toISOString());
+    const commentId = String(payload?.comment?.id || `c_${uuidv4()}`);
+    const fullName = String(
+      payload?.comment?.fullname ||
+      tenant?.userName ||
+      "You"
+    ).trim() || "You";
+    const profilePictureUrl = String(payload?.comment?.profile_picture_url || "").trim();
+    const entityClassRaw = String(payload?.entityClass || "Modules\\Leads\\Entities\\Lead").replace(/^"+|"+$/g, "");
+    const entityClassQuoted = `"${entityClassRaw}"`;
+    const entityClassHtmlQuoted = `&quot;${entityClassRaw}&quot;`;
+    const pathValue = String(payload?.path || `/leads/leads/${leadId}`);
+    const postUrl = resolveCommunicationUrl(leadId, pathValue);
+
+    function buildForm(entityClassValue) {
+      const form = new URLSearchParams();
+      form.append("comment[id]", commentId);
+      form.append("comment[parent]", String(payload?.comment?.parent || ""));
+      form.append("comment[created]", String(payload?.comment?.created || nowIso));
+      form.append("comment[modified]", String(payload?.comment?.modified || nowIso));
+      form.append("comment[content]", content);
+      form.append("comment[fullname]", fullName);
+      form.append("comment[profile_picture_url]", profilePictureUrl);
+      form.append("comment[created_by_current_user]", String(payload?.comment?.created_by_current_user ?? true));
+      form.append("comment[upvote_count]", String(payload?.comment?.upvote_count ?? 0));
+      form.append("comment[user_has_upvoted]", String(payload?.comment?.user_has_upvoted ?? false));
+      form.append("entityId", leadId);
+      form.append("entityClass", entityClassValue);
+      form.append("path", pathValue);
+      return form.toString();
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const headers = {
+        Accept: "application/json, text/plain, */*",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      };
+      const authHeaderValue = evolveAuthHeaderValue();
+      if (authHeaderValue) headers.Authorization = authHeaderValue;
+
+      let response = await evolveFetch("log communication (POST)", () =>
+        fetchImpl(postUrl, {
+          method: "POST",
+          headers,
+          body: buildForm(entityClassQuoted),
+          signal: controller.signal,
+        })
+      );
+      let text = await response.text();
+      if (!response.ok && response.status === 400) {
+        response = await evolveFetch("log communication (POST, entityClass retry)", () =>
+          fetchImpl(postUrl, {
+            method: "POST",
+            headers,
+            body: buildForm(entityClassRaw),
+            signal: controller.signal,
+          })
+        );
+        text = await response.text();
+      }
+      if (!response.ok && response.status === 400) {
+        response = await evolveFetch("log communication (POST, HTML entity retry)", () =>
+          fetchImpl(postUrl, {
+            method: "POST",
+            headers,
+            body: buildForm(entityClassHtmlQuoted),
+            signal: controller.signal,
+          })
+        );
+        text = await response.text();
+      }
+      if (!response.ok) {
+        const preview = text && text.length > 700 ? `${text.slice(0, 700)}...` : text;
+        throw new Error(`EvolveSA communication HTTP ${response.status}${preview ? `: ${preview}` : ""}`);
+      }
+
+      return {
+        id: commentId,
+        entityId: leadId,
+        channel: String(payload?.channel || "note"),
+        status: "logged",
+        content,
+        postedAt: nowIso,
+        path: pathValue,
+        endpoint: postUrl,
+        responsePreview: text ? (text.length > 400 ? `${text.slice(0, 400)}...` : text) : "",
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   return {
     providerName: "EvolveSA",
     createLead,
     createStockUnit,
+    logCommunication,
   };
 }
 

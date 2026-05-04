@@ -163,6 +163,11 @@ const CONSENT_TOKEN_SECRET = (
 ).trim();
 const CONSENT_LINK_BASE_URL = (process.env.CONSENT_LINK_BASE_URL || "").trim();
 const CONSENT_DEFAULT_EXPIRY_HOURS = Number(process.env.CONSENT_DEFAULT_EXPIRY_HOURS || 24);
+/** Max consent audit events kept in commands-store.json (append-only tail). */
+const CONSENT_EVENTS_STORE_CAP = Math.max(
+  5000,
+  Math.min(200_000, Number(process.env.CONSENT_EVENTS_STORE_CAP || 50_000) || 50_000)
+);
 const SMTP_HOST = (process.env.SMTP_HOST || "").trim();
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
 const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").trim().toLowerCase() === "true";
@@ -730,7 +735,7 @@ function persistStore() {
     alertRules: Array.from(alertRules.values()),
     testDriveSessions: Array.from(testDriveSessions.values()),
     consentRecords: Array.from(consentRecords.values()),
-    consentEvents: consentEvents.slice(-5000),
+    consentEvents: consentEvents.slice(-CONSENT_EVENTS_STORE_CAP),
   };
   fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2), "utf8");
 }
@@ -824,10 +829,15 @@ function validateCommandPayload(commandType, payload) {
     }
     case "CREDIT_CHECK": {
       const consentId = String(payload?.consentId || "").trim();
-      if (!consentId) {
+      const inlineConsent = payload?.consent;
+      const inlineAccepted =
+        isPlainObject(inlineConsent) &&
+        (inlineConsent.accepted === true || String(inlineConsent.accepted || "").toLowerCase() === "true");
+      if (!consentId && !inlineAccepted) {
         return {
           error: "invalid_payload",
-          hint: "CREDIT_CHECK requires payload.consentId from an approved consent request.",
+          hint:
+            "CREDIT_CHECK requires payload.consentId (email approval) or payload.consent.accepted=true (in-app checkbox).",
         };
       }
       const applicant = payload.applicant || {};
@@ -983,6 +993,13 @@ function canAccessTenantScopedRecord(recordTenant = {}, requestTenant = {}) {
   return recordBranch === requestBranch;
 }
 
+function sanitizeConsentDeliveryForApi(delivery) {
+  if (!delivery || typeof delivery !== "object") return delivery || null;
+  const { approveUrl: _omit, ...rest } = delivery;
+  return rest;
+}
+
+/** Summary for list/create responses — omits magic-link URL (token) from API JSON. */
 function consentPublicView(record) {
   return {
     consentId: record.consentId,
@@ -997,7 +1014,28 @@ function consentPublicView(record) {
     leadCorrelationId: record.leadCorrelationId || null,
     leadId: record.leadId || null,
     approvalChannel: record.approvalChannel || null,
-    delivery: record.delivery || null,
+    delivery: sanitizeConsentDeliveryForApi(record.delivery),
+  };
+}
+
+/**
+ * POPIA / audit trail: who requested, from where, customer-facing identifiers,
+ * approval/reject context from the public link, append-only events, downstream use.
+ */
+function consentAuditPayload(record) {
+  const consentId = String(record?.consentId || "").trim();
+  const events = consentEvents.filter((e) => e && String(e.consentId || "") === consentId);
+  return {
+    requestedBy: record.requestedBy || null,
+    requestMeta: record.requestMeta || null,
+    applicant: record.applicant || null,
+    approvalMeta: record.approvalMeta || null,
+    revokeReason: record.revokeReason || null,
+    usedAt: record.usedAt || null,
+    creditCheckCorrelationId: record.creditCheckCorrelationId || null,
+    tokenIssuedAt: record.tokenIssuedAt || null,
+    updatedAt: record.updatedAt || null,
+    events,
   };
 }
 
@@ -1117,6 +1155,11 @@ function getConsentMailer() {
       user: SMTP_USER,
       pass: SMTP_PASS,
     },
+    // Avoid hanging until the host/proxy times out (no email + no clear error in logs).
+    connectionTimeout: 25_000,
+    greetingTimeout: 20_000,
+    socketTimeout: 45_000,
+    tls: { minVersion: "TLSv1.2" },
   });
   return consentMailer;
 }
@@ -1164,6 +1207,14 @@ async function notifyConsentEmail(consentRecord, approveUrl) {
     `<p><a href="${approveUrl}">Review and approve/reject consent</a></p>` +
     `<p>If you did not request this, please ignore this email and contact the dealership.</p>`;
   try {
+    const toDomain = recipient.includes("@") ? recipient.split("@").pop() : "";
+    log("info", "consent_email_send_start", {
+      consentId: consentRecord.consentId,
+      toDomain,
+      smtpHost: SMTP_HOST,
+      smtpPort: SMTP_PORT,
+      dealerId: consentRecord.tenantContext?.dealerId || null,
+    });
     const info = await transporter.sendMail({
       from: resolveConsentFromAddress(consentRecord.tenantContext || {}, dealerDisplayName),
       to: recipient,
@@ -1186,6 +1237,9 @@ async function notifyConsentEmail(consentRecord, approveUrl) {
       consentId: consentRecord.consentId,
       to: recipient,
       error: e?.message || String(e),
+      code: e?.code || null,
+      command: e?.command || null,
+      response: e?.response || null,
     });
     return {
       emailSent: false,
@@ -2266,7 +2320,24 @@ async function processCommand(commandType, payload) {
     if (!leadId) {
       throw new Error("leadId is required (or leadCorrelationId that maps to a CREATE_LEAD)");
     }
-    const approvedConsent = resolveApprovedConsent(payload, payload?._tenantContext || {});
+    const consentId = String(payload?.consentId || "").trim();
+    const inlineConsent = payload?.consent;
+    const inlineAccepted =
+      isPlainObject(inlineConsent) &&
+      (inlineConsent.accepted === true || String(inlineConsent.accepted || "").toLowerCase() === "true");
+    let approvedConsent;
+    if (consentId) {
+      approvedConsent = resolveApprovedConsent(payload, payload?._tenantContext || {});
+    } else if (inlineAccepted) {
+      if (CREDIT_CHECK_MODE !== "stub") {
+        throw new Error(
+          "CREDIT_CHECK without consentId is only supported in CREDIT_CHECK_MODE=stub; use email consent or add a provider adapter."
+        );
+      }
+      approvedConsent = { consentId: null };
+    } else {
+      throw new Error("consentId is required before soft credit check");
+    }
     const request = buildCreditQuickRequest(payload, leadId);
     if (CREDIT_CHECK_MODE !== "stub") {
       throw new Error(`Unsupported CREDIT_CHECK_MODE=${CREDIT_CHECK_MODE}. Configure provider adapter or set stub.`);
@@ -4233,6 +4304,8 @@ app.post("/api/v1/consents", requireAuth, extractTenantContext, async (req, res)
     for (const existing of consentRecords.values()) {
       if (String(existing.status || "").toLowerCase() !== "pending") continue;
       if (!canAccessTenantScopedRecord(existing.tenantContext || {}, req.tenantContext || {})) continue;
+      // Allow a new request after a previous SMTP failure (still "pending" but not deliverable).
+      if (String(existing.delivery?.emailDispatch || "") === "failed") continue;
       const existingLead = String(existing.leadCorrelationId || existing.leadId || "").trim();
       const incomingLead = String(leadCorrelationId || leadId).trim();
       if (existingLead && incomingLead && existingLead === incomingLead && existing.purpose === purpose) {
@@ -4254,22 +4327,8 @@ app.post("/api/v1/consents", requireAuth, extractTenantContext, async (req, res)
     };
     const token = signConsentToken(tokenPayload);
     const approveUrl = buildConsentApprovalLink(req, token);
-    const delivery = await notifyConsentEmail({
-      consentId,
-      purpose,
-      applicant: {
-        email,
-        firstName,
-        surname,
-        idNumberMasked: maskIdNumber(idNumber),
-      },
-      tenantContext: req.tenantContext || {},
-      expiresAt,
-    }, approveUrl);
-    if (!delivery.emailSent) {
-      return sendApiError(req, res, 502, "email_delivery_failed", delivery.warning || "Failed to send consent email.");
-    }
 
+    // Respond before SMTP completes. Proxies (e.g. Render ~30s) often time out while Brevo is still sending.
     const record = {
       consentId,
       status: "pending",
@@ -4307,7 +4366,9 @@ app.post("/api/v1/consents", requireAuth, extractTenantContext, async (req, res)
         userAgent: req.headers["user-agent"] || null,
       },
       delivery: {
-        ...delivery,
+        emailSent: false,
+        emailDispatch: "pending",
+        providerRef: null,
         approveUrl,
       },
       tokenIssuedAt: requestedAt,
@@ -4321,16 +4382,75 @@ app.post("/api/v1/consents", requireAuth, extractTenantContext, async (req, res)
       leadId: record.leadId,
       purpose,
     });
-    appendConsentEvent(consentId, "delivery_sent", {
-      channel,
-      email,
-      providerRef: delivery.providerRef,
-    });
     persistStore();
 
-    return res.status(201).json({
+    res.status(201).json({
       ok: true,
       ...consentPublicView(record),
+    });
+
+    const mailPayload = {
+      consentId,
+      purpose,
+      applicant: {
+        email,
+        firstName,
+        surname,
+        idNumberMasked: maskIdNumber(idNumber),
+      },
+      tenantContext: req.tenantContext || {},
+      expiresAt,
+    };
+    setImmediate(() => {
+      void (async () => {
+        try {
+          const delivery = await notifyConsentEmail(mailPayload, approveUrl);
+          const r = consentRecords.get(consentId);
+          if (!r) return;
+          const dispatch = delivery.emailSent ? "sent" : "failed";
+          r.delivery = {
+            ...delivery,
+            emailDispatch: dispatch,
+            approveUrl: r.delivery?.approveUrl || approveUrl,
+          };
+          r.updatedAt = new Date().toISOString();
+          if (delivery.emailSent) {
+            appendConsentEvent(consentId, "delivery_sent", {
+              channel,
+              email,
+              providerRef: delivery.providerRef,
+            });
+          } else {
+            appendConsentEvent(consentId, "delivery_failed", {
+              channel,
+              email,
+              warning: delivery.warning || "unknown",
+            });
+          }
+          consentRecords.set(consentId, r);
+          persistStore();
+        } catch (e) {
+          log("error", "consent_email_async_failed", { consentId, error: e?.message || String(e) });
+          const r = consentRecords.get(consentId);
+          if (!r) return;
+          const warn = e?.message || String(e);
+          r.delivery = {
+            ...(r.delivery || {}),
+            emailSent: false,
+            emailDispatch: "failed",
+            warning: warn,
+            approveUrl: r.delivery?.approveUrl || approveUrl,
+          };
+          r.updatedAt = new Date().toISOString();
+          appendConsentEvent(consentId, "delivery_failed", {
+            channel,
+            email,
+            warning: warn,
+          });
+          consentRecords.set(consentId, r);
+          persistStore();
+        }
+      })();
     });
   } catch (e) {
     return sendApiError(req, res, 500, "consent_create_failed", e?.message || String(e));
@@ -4349,6 +4469,7 @@ app.get("/api/v1/consents/:consentId", requireAuth, extractTenantContext, (req, 
   return res.json({
     ok: true,
     ...consentPublicView(record),
+    audit: consentAuditPayload(record),
   });
 });
 
@@ -4714,6 +4835,8 @@ app.listen(PORT, "0.0.0.0", () => {
     tenantRingfence: ENFORCE_TENANT_RINGFENCE,
     mappedUsers: USER_EMAIL_DEALER_MAP.size,
     tenantConfigSource: TENANT_CONFIG.source,
+    consentSmtpConfigured: smtpConfigured(),
+    consentLinkBaseConfigured: Boolean(String(CONSENT_LINK_BASE_URL || "").trim()),
   });
 });
 

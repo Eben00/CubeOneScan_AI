@@ -37,4 +37,13 @@
     <color name="photo_placeholder">#FFE2E8F0</color>
     <color name="accent_glow">#FF2B6FB5</color>
     <color name="scanner_bottom_scrim">#B31B2E4B</color>
+
+    <!-- Credit score bands -->
+    <color name="credit_band_excellent">#008A2E</color>
+    <color name="credit_band_good">#3B9B18</color>
+    <color name="credit_band_favourable">#7BCB00</color>
+    <color name="credit_band_average">#F2C400</color>
+    <color name="credit_band_below_average">#F57C00</color>
+    <color name="credit_band_unfavourable">#F44336</color>
+    <color name="credit_band_poor">#C60000</color>
 </resources>

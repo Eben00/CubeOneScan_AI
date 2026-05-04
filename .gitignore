@@ -49,6 +49,9 @@ scanner_report.txt
 ai_scanner_report*.txt
 cubeone_log*.txt
 
+# EvolveSA dealer / pilot release — connector API key for locked APK (never commit)
+evolvesa-dealer.properties
+
 # Environment secrets
 .env
 **/.env

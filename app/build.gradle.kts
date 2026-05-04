@@ -6,7 +6,26 @@ plugins {
     id("com.google.firebase.crashlytics")
 }
 
+import com.android.build.api.variant.BuildConfigField
+import com.android.build.api.variant.*
 import java.util.Properties
+
+fun javaStringLiteralForBuildConfig(value: String): String =
+    '"' + value.replace("\\", "\\\\").replace("\"", "\\\"") + '"'
+
+fun Project.loadEvolvesaDealerApiKey(): String {
+    val fromEnv = System.getenv("EVOLVESA_DEALER_API_KEY")?.trim().orEmpty()
+    if (fromEnv.isNotEmpty()) return fromEnv
+    val fromProject = (findProperty("evolvesaDealerApiKey") as String?)?.trim().orEmpty()
+    if (fromProject.isNotEmpty()) return fromProject
+    val fromRoot = (rootProject.findProperty("evolvesaDealerApiKey") as String?)?.trim().orEmpty()
+    if (fromRoot.isNotEmpty()) return fromRoot
+    val f = rootProject.file("evolvesa-dealer.properties")
+    if (!f.exists()) return ""
+    val p = Properties()
+    f.inputStream().use { p.load(it) }
+    return p.getProperty("connector.api.key", "").trim()
+}
 
 android {
     namespace = "com.cubeone.scan"
@@ -20,6 +39,12 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("Boolean", "LOCK_CONNECTOR_CONFIG", "false")
+        buildConfigField("String", "LOCKED_CONNECTOR_BASE_URL", "\"\"")
+        buildConfigField("String", "LOCKED_AUTH_BASE_URL", "\"\"")
+        buildConfigField("String", "LOCKED_CONNECTOR_API_KEY", "\"\"")
+        buildConfigField("Boolean", "ENABLE_EMAIL_CONSENT_FLOW", "false")
     }
 
     flavorDimensions += "brand"
@@ -32,7 +57,9 @@ android {
             dimension = "brand"
             applicationIdSuffix = ".evolvesa"
             versionNameSuffix = "-evolvesa"
-            resValue("string", "app_name", "EvolveSAScan")
+            resValue("string", "app_name", "EvolveSA")
+            // POPIA: send approval link to lead email (connector /api/v1/consents + Brevo SMTP).
+            buildConfigField("Boolean", "ENABLE_EMAIL_CONSENT_FLOW", "true")
         }
     }
 
@@ -89,6 +116,40 @@ android {
 
     buildFeatures {
         viewBinding = true
+        buildConfig = true
+    }
+}
+
+// beforeVariants builders do not expose buildConfigFields on AGP 8.2 — use onVariants instead.
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        val n = variant.name.lowercase()
+        // Dealer lock applies to evolvesaDebug and evolvesaRelease when a build-time key is supplied
+        // (evolvesa-dealer.properties, EVOLVESA_DEALER_API_KEY, or -PevolvesaDealerApiKey).
+        if (!n.contains("evolvesa")) return@onVariants
+        val apiKey = project.loadEvolvesaDealerApiKey()
+        if (apiKey.isEmpty()) return@onVariants
+        val propsFile = rootProject.file("evolvesa-dealer.properties")
+        val p = Properties()
+        if (propsFile.exists()) propsFile.inputStream().use { p.load(it) }
+        val base = p.getProperty("connector.base.url", "https://api.cubeone.co.za").trim()
+        val auth = p.getProperty("auth.base.url", "https://auth.cubeone.co.za").trim()
+        variant.buildConfigFields.put(
+            "LOCK_CONNECTOR_CONFIG",
+            BuildConfigField("Boolean", "true", null)
+        )
+        variant.buildConfigFields.put(
+            "LOCKED_CONNECTOR_BASE_URL",
+            BuildConfigField("String", javaStringLiteralForBuildConfig(base), null)
+        )
+        variant.buildConfigFields.put(
+            "LOCKED_AUTH_BASE_URL",
+            BuildConfigField("String", javaStringLiteralForBuildConfig(auth), null)
+        )
+        variant.buildConfigFields.put(
+            "LOCKED_CONNECTOR_API_KEY",
+            BuildConfigField("String", javaStringLiteralForBuildConfig(apiKey), null)
+        )
     }
 }
 

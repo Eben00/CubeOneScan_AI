@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "660107323917",
+    "project_id": "com-cubeone-scan",
+    "storage_bucket": "com-cubeone-scan.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:660107323917:android:e17da398ed6e3e4ffb0344",
+        "android_client_info": {
+          "package_name": "com.cubeone.scan.evolvesa"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBTxxt0HPPaAF45BooN31mpHQAAGSNJJZ4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

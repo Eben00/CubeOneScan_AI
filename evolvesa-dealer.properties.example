@@ -1,0 +1,11 @@
+# Copy to evolvesa-dealer.properties (gitignored) at the REPO ROOT, or pass secrets at build time.
+# Used ONLY when building :app:assembleEvolvesaRelease — embeds connector URL + auth URL + API key
+# and hides those fields in the dealer APK (Settings shows a short notice instead).
+#
+# Build-time alternatives (override file):
+#   Environment: EVOLVESA_DEALER_API_KEY
+#   Gradle: -PevolvesaDealerApiKey=...   or in root gradle.properties (do not commit secrets)
+
+connector.api.key=PASTE_RENDER_CONNECTOR_API_KEY_HERE
+connector.base.url=https://api.cubeone.co.za
+auth.base.url=https://auth.cubeone.co.za

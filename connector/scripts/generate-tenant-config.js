@@ -34,6 +34,7 @@ const payload = {
   dealerAliases: parseMap(process.env.DEALER_ID_ALIASES),
   emailDealerMap: parseMap(process.env.USER_EMAIL_DEALER_MAP),
   vmgDealerScopes: parseList(process.env.VMG_DEALER_SCOPES),
+  vmgStockFeedUrlByDealer: parseMap(process.env.VMG_STOCK_FEED_URL_BY_DEALER),
   evolvesaLeadReceivingEntityMap: parseMap(process.env.EVOLVESA_LEAD_RECEIVING_ENTITY_MAP),
   evolvesaLeadTriggerUrlByDealer: parseMap(process.env.EVOLVESA_LEAD_TRIGGER_URL_BY_DEALER),
 };

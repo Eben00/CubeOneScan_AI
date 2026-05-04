@@ -12,14 +12,33 @@
     <!-- Home -->
     <string name="home_subtitle">Scan South African driver\'s licences and look up vehicles.</string>
     <string name="home_ops_dashboard">Operations dashboard</string>
+    <string name="home_choose_action">Choose an action to begin</string>
+    <string name="home_scan_driver_license">Scan driver licence</string>
+    <string name="home_scan_vehicle_license">Scan vehicle licence</string>
+    <string name="home_stock_take">Stock take</string>
+    <string name="home_trade_in">Trade-in</string>
+    <string name="home_test_drive_safety">Test drive safety</string>
+    <string name="home_manager_approvals">Manager approvals</string>
+    <string name="home_audit_events">Audit events</string>
+    <string name="home_logout_all_devices">Log out all devices</string>
+    <string name="home_offline_queue_placeholder">Offline queue: 0 pending</string>
+    <string name="home_command_health_placeholder">Sync health: ready</string>
+    <string name="home_retry_queued_commands">Retry queued commands</string>
     <string name="home_scan_hint">Point the camera at the barcode on the back of the licence. Ensure good light and hold steady.</string>
     <string name="home_start_scan">Start scanning</string>
     <string name="home_settings">Settings</string>
     <string name="home_footer">CubeOne connector required on your network.</string>
 
     <!-- Settings -->
+    <!-- When non-blank, used if the user has not saved a value in Settings (per product flavor). -->
+    <string name="default_connector_base_url" translatable="false"></string>
+    <string name="default_auth_base_url" translatable="false"></string>
+
+    <string name="settings_connector_managed_notice">Connector and authentication are configured for you. Contact support if the app cannot reach the server.</string>
+
     <string name="settings_title">Connector</string>
     <string name="settings_intro">Point the app at your CubeOne Node connector (local IP or tunnel URL). Save, then use Test connection.</string>
+    <string name="settings_intro_connector_managed">This build uses a fixed production connector. URL and API key are not shown here.</string>
     <string name="settings_base_url_hint">Base URL</string>
     <string name="settings_auth_base_url_hint">Auth base URL (optional)</string>
     <string name="settings_auth_base_url_helper">Leave blank if auth runs on the same host as the connector with port 4000. For cloud hosting, set this to your auth service URL (e.g. https://auth.yourdomain.com).</string>
@@ -29,14 +48,16 @@
     <string name="settings_open_privacy_policy">Open privacy policy</string>
     <string name="settings_contact_support">Contact support</string>
     <string name="settings_request_deletion">Request account deletion</string>
-    <string name="settings_privacy_policy_url">https://www.cudeone.co.za</string>
+    <string name="settings_privacy_policy_url">https://www.cubeone.co.za</string>
     <string name="settings_support_email">support@example.com</string>
     <string name="settings_deletion_email">privacy@example.com</string>
     <string name="settings_support_subject">CubeOneScan support request</string>
     <string name="settings_deletion_subject">CubeOneScan account deletion request</string>
     <string name="settings_contact_not_configured">Contact details not configured yet. Update SettingsActivity string values before release.</string>
+    <string name="api_key_rejected_message">API key rejected (401). In app Settings, set API Key exactly to API_KEY in connector .env on your PC.</string>
     <string name="save">Save</string>
     <string name="test_connection">Test connection</string>
+    <string name="settings_preflight_check">Run preflight check</string>
 
     <!-- License result -->
     <string name="license_screen_title">Licence details</string>
@@ -52,10 +73,34 @@
     <string name="credit_check_title">Quick credit check</string>
     <string name="credit_email_hint">Email (optional)</string>
     <string name="credit_consent_label">Client consent captured for soft credit check</string>
+    <string name="request_credit_consent">Request consent by email</string>
+    <string name="credit_consent_status_none">Consent status: not requested</string>
+    <string name="credit_consent_status_pending">Consent status: pending customer approval</string>
+    <string name="credit_consent_status_approved">Consent status: approved</string>
+    <string name="credit_consent_status_rejected">Consent status: rejected</string>
+    <string name="credit_consent_status_expired">Consent status: expired</string>
+    <string name="credit_consent_status_revoked">Consent status: revoked</string>
+    <string name="credit_consent_email_required">Enter a valid email to request consent</string>
+    <string name="credit_consent_request_sent">Consent request sent. Ref: %1$s</string>
     <string name="run_quick_credit_check">Run quick score</string>
     <string name="credit_result_placeholder">Quick score not run yet</string>
+    <string name="credit_score_result_format">Quick score: %1$d</string>
+    <string name="credit_score_rating_format">%1$s (%2$s)</string>
+    <string name="credit_score_unknown">Unknown</string>
+    <string name="credit_band_excellent_label">EXCELLENT: 767 - 999</string>
+    <string name="credit_band_good_label">GOOD: 681 - 766</string>
+    <string name="credit_band_favourable_label">FAVOURABLE: 614 - 680</string>
+    <string name="credit_band_average_label">AVERAGE: 583 - 613</string>
+    <string name="credit_band_below_average_label">BELOW AVERAGE: 527 - 582</string>
+    <string name="credit_band_unfavourable_label">UNFAVOURABLE: 487 - 526</string>
+    <string name="credit_band_poor_label">POOR: 0 - 486</string>
+    <string name="communication_log_title">CRM communication log</string>
+    <string name="communication_note_hint">Comment / update for lead timeline</string>
+    <string name="communication_log_button">Log note to CRM timeline</string>
+    <string name="communication_last_placeholder">No communication logged yet.</string>
     <string name="ops_targets_title">Ops KPI targets and forecast</string>
     <string name="ops_dashboard_title">Operations dashboard</string>
+    <string name="ops_dashboard_subtitle">Track targets, monthly forecast, and dealer-level performance from one view.</string>
     <string name="target_leads_hint">Monthly lead target</string>
     <string name="target_test_drives_hint">Monthly test drive target</string>
     <string name="save_targets">Save targets</string>
@@ -63,9 +108,12 @@
     <string name="ops_forecast_placeholder">Forecast not loaded yet</string>
     <string name="ops_oem_placeholder">OEM rollup not loaded yet</string>
     <string name="test_drive_title">Test drive safety</string>
+    <string name="test_drive_screen_title">Test drive safety</string>
+    <string name="test_drive_driver_placeholder">Driver details not available yet</string>
     <string name="test_drive_vehicle_ref_hint">Vehicle ref (stock number/reg)</string>
     <string name="test_drive_emergency_contact_hint">Emergency contact number</string>
     <string name="test_drive_return_minutes_hint">Planned return in minutes</string>
+    <string name="scan_vehicle_licence_for_test_drive">Scan vehicle licence</string>
     <string name="start_test_drive">Start test drive</string>
     <string name="test_drive_checkin">Safety check-in</string>
     <string name="complete_test_drive">Complete test drive</string>

@@ -13,6 +13,9 @@ import com.cubeone.scan.core.auth.AuthStore
 import com.cubeone.scan.services.CommandApiService
 import com.cubeone.scan.scanner.ScannerActivity
 import com.google.android.material.button.MaterialButton
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class HomeActivity : AppCompatActivity() {
     private var refreshQueueBadgeFn: (() -> Unit)? = null
@@ -44,10 +47,10 @@ class HomeActivity : AppCompatActivity() {
         val role = normalizeBusinessRole(AuthStore.getRole(this).orEmpty())
         val token = AuthStore.getAccessToken(this).orEmpty()
         val isOfflineDemo = token == "offline-demo-token"
-        val canAccessSettings = isOfflineDemo || role == "dealer_principal" || role == "sales_manager"
+        val canAccessSettings = isOfflineDemo || role == "dealer_principal" || role == "sales_manager" || role == "sales_person"
         val canAccessApprovals = role == "dealer_principal" || role == "sales_manager"
         val canAccessAudit = role == "dealer_principal" || role == "sales_manager" || role == "sales_person"
-        val canShareWorkflows = role == "dealer_principal" || role == "sales_manager" || role == "sales_person"
+        val canTestDriveWorkflow = role == "dealer_principal" || role == "sales_manager" || role == "sales_person"
         val canAccessOpsDashboard = role == "dealer_principal" || role == "sales_manager" || role == "sales_person"
 
         fun openScanner(mode: String, postAction: String = ScannerActivity.ACTION_NONE) {
@@ -70,26 +73,33 @@ class HomeActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.btnTradeInWorkflow).setOnClickListener {
             openScanner(ScannerActivity.MODE_VEHICLE, ScannerActivity.ACTION_TRADE_IN)
         }
-        val btnShareLeadWorkflow = findViewById<MaterialButton>(R.id.btnShareLeadWorkflow)
-        val btnShareStockWorkflow = findViewById<MaterialButton>(R.id.btnShareStockWorkflow)
-        if (canShareWorkflows) {
-            btnShareLeadWorkflow.visibility = android.view.View.VISIBLE
-            btnShareStockWorkflow.visibility = android.view.View.VISIBLE
-            btnShareLeadWorkflow.setOnClickListener {
-                openScanner(ScannerActivity.MODE_DRIVER, ScannerActivity.ACTION_SHARE_LEAD)
-            }
-            btnShareStockWorkflow.setOnClickListener {
-                openScanner(ScannerActivity.MODE_DRIVER, ScannerActivity.ACTION_SHARE_STOCK)
+        val btnTestDriveWorkflow = findViewById<MaterialButton>(R.id.btnTestDriveWorkflow)
+        if (canTestDriveWorkflow) {
+            btnTestDriveWorkflow.visibility = android.view.View.VISIBLE
+            btnTestDriveWorkflow.setOnClickListener {
+                openScanner(ScannerActivity.MODE_DRIVER, ScannerActivity.ACTION_TEST_DRIVE)
             }
         } else {
-            btnShareLeadWorkflow.visibility = android.view.View.GONE
-            btnShareStockWorkflow.visibility = android.view.View.GONE
+            btnTestDriveWorkflow.visibility = android.view.View.GONE
         }
         val tvQueueBadge = findViewById<TextView>(R.id.tvQueueBadge)
+        val tvCommandHealth = findViewById<TextView>(R.id.tvCommandHealth)
         val btnRetryQueue = findViewById<MaterialButton>(R.id.btnRetryQueue)
         fun refreshQueueBadge() {
-            val count = CommandApiService.getQueuedCommandCount(this)
+            val health = CommandApiService.getCommandHealthSnapshot(this)
+            val count = health.queuedCount
             tvQueueBadge.text = "Offline queue: $count pending"
+            val updated = if (health.updatedAtMs > 0L) {
+                SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(health.updatedAtMs))
+            } else {
+                "now"
+            }
+            val healthText = if (!health.lastError.isNullOrBlank()) {
+                "Sync health: attention needed ($updated) • ${health.lastError}"
+            } else {
+                "Sync health: stable • last flush sent ${health.lastFlushSent}, remaining ${health.lastFlushRemaining}"
+            }
+            tvCommandHealth.text = healthText
         }
         refreshQueueBadgeFn = ::refreshQueueBadge
         refreshQueueBadge()

@@ -21,6 +21,7 @@
             android:textStyle="bold" />
 
         <TextView
+            android:id="@+id/tvSettingsIntro"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
@@ -45,6 +46,12 @@
                 android:orientation="vertical"
                 android:background="@drawable/bg_glass_card"
                 android:padding="@dimen/padding_card">
+
+                <LinearLayout
+                    android:id="@+id/groupConnectorSecrets"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
 
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
@@ -112,6 +119,27 @@
                     android:layout_marginTop="8dp"
                     android:text="@string/test_connection"
                     app:cornerRadius="@dimen/corner_button" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnPreflight"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_preflight_check"
+                    app:cornerRadius="@dimen/corner_button" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/tvConnectorManagedNotice"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:lineSpacingExtra="3dp"
+                    android:text="@string/settings_connector_managed_notice"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="14sp"
+                    android:visibility="gone" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnManageUsers"

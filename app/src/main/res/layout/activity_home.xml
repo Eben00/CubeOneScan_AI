@@ -3,7 +3,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@drawable/bg_app_gradient"
+    android:background="@color/background"
     android:clipToPadding="false"
     android:fillViewport="true"
     android:padding="@dimen/padding_screen">
@@ -13,12 +13,12 @@
         android:layout_height="wrap_content"
         android:gravity="center_horizontal"
         android:orientation="vertical"
-        android:paddingTop="32dp"
-        android:paddingBottom="40dp">
+        android:paddingTop="20dp"
+        android:paddingBottom="28dp">
 
         <ImageView
-            android:layout_width="88dp"
-            android:layout_height="88dp"
+            android:layout_width="76dp"
+            android:layout_height="76dp"
             android:contentDescription="@null"
             android:src="@drawable/brand_logo"
             android:scaleType="fitCenter"
@@ -28,27 +28,27 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
+            android:layout_marginTop="14dp"
             android:letterSpacing="0.02"
             android:text="@string/app_name"
-            android:textColor="@color/white"
-            android:textSize="28sp"
+            android:textColor="@color/primary_dark"
+            android:textSize="26sp"
             android:textStyle="bold" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="6dp"
             android:gravity="center"
             android:lineSpacingExtra="4dp"
             android:text="@string/home_subtitle"
             android:textColor="@color/text_secondary"
-            android:textSize="15sp" />
+            android:textSize="14sp" />
 
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="32dp"
+            android:layout_marginTop="20dp"
             app:cardBackgroundColor="@android:color/transparent"
             app:cardCornerRadius="@dimen/corner_card"
             app:cardElevation="0dp"
@@ -65,7 +65,7 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Choose an action to begin"
+                    android:text="@string/home_choose_action"
                     android:textColor="@color/text_secondary"
                     android:textSize="13sp" />
 
@@ -75,7 +75,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="16dp"
                     android:minHeight="56dp"
-                    android:text="Scan Driver License"
+                    android:text="@string/home_scan_driver_license"
                     app:cornerRadius="@dimen/corner_button" />
 
                 <com.google.android.material.button.MaterialButton
@@ -85,7 +85,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:minHeight="52dp"
-                    android:text="Scan Vehicle License"
+                    android:text="@string/home_scan_vehicle_license"
                     app:cornerRadius="@dimen/corner_button" />
 
                 <com.google.android.material.button.MaterialButton
@@ -95,7 +95,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:minHeight="52dp"
-                    android:text="Stock Take"
+                    android:text="@string/home_stock_take"
                     app:cornerRadius="@dimen/corner_button" />
 
                 <com.google.android.material.button.MaterialButton
@@ -105,27 +105,17 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:minHeight="52dp"
-                    android:text="Trade-In"
+                    android:text="@string/home_trade_in"
                     app:cornerRadius="@dimen/corner_button" />
 
                 <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnShareLeadWorkflow"
+                    android:id="@+id/btnTestDriveWorkflow"
                     style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:minHeight="52dp"
-                    android:text="Share Lead"
-                    app:cornerRadius="@dimen/corner_button" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnShareStockWorkflow"
-                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:minHeight="52dp"
-                    android:text="Share Stock"
+                    android:text="@string/home_test_drive_safety"
                     app:cornerRadius="@dimen/corner_button" />
 
                 <com.google.android.material.button.MaterialButton
@@ -157,7 +147,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:minHeight="52dp"
-            android:text="Manager approvals"
+            android:text="@string/home_manager_approvals"
             app:cornerRadius="@dimen/corner_button" />
 
         <com.google.android.material.button.MaterialButton
@@ -167,7 +157,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:minHeight="52dp"
-            android:text="Audit events"
+            android:text="@string/home_audit_events"
             app:cornerRadius="@dimen/corner_button" />
 
         <com.google.android.material.button.MaterialButton
@@ -177,7 +167,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:minHeight="52dp"
-            android:text="Log out all devices"
+            android:text="@string/home_logout_all_devices"
             app:cornerRadius="@dimen/corner_button" />
 
         <TextView
@@ -186,7 +176,17 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:gravity="center"
-            android:text="Offline queue: 0 pending"
+            android:text="@string/home_offline_queue_placeholder"
+            android:textColor="@color/text_secondary"
+            android:textSize="12sp" />
+
+        <TextView
+            android:id="@+id/tvCommandHealth"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center"
+            android:text="@string/home_command_health_placeholder"
             android:textColor="@color/text_secondary"
             android:textSize="12sp" />
 
@@ -197,7 +197,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
             android:minHeight="52dp"
-            android:text="Retry queued commands"
+            android:text="@string/home_retry_queued_commands"
             app:cornerRadius="@dimen/corner_button" />
 
         <com.google.android.material.button.MaterialButton

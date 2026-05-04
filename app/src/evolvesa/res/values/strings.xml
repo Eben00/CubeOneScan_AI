@@ -1,8 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">EvolveSAScan</string>
-    <string name="home_footer">Powered by CubeOne platform for EvolveSA.</string>
-    <string name="settings_intro">Point the app at your CubeOne connector for EvolveSA (local IP or tunnel URL). Save, then use Test connection.</string>
-    <string name="settings_support_subject">EvolveSAScan support request</string>
-    <string name="settings_deletion_subject">EvolveSAScan account deletion request</string>
+    <string name="app_name">EvolveSA</string>
+    <string name="default_connector_base_url" translatable="false">https://api.cubeone.co.za</string>
+    <string name="default_auth_base_url" translatable="false">https://auth.cubeone.co.za</string>
+    <string name="home_footer">Signed in for your dealership. Use Settings for user tools, or contact EvolveSA support if something does not sync.</string>
+    <string name="settings_intro">Debug builds: set connector URL, optional auth URL, and API key, then Save. Dealer release builds hide these fields — use the pilot build from EvolveSA.</string>
+    <string name="settings_privacy_policy_url">https://www.evolvesa.co.za</string>
+    <string name="settings_support_email">support@evolvesa.co.za</string>
+    <string name="settings_deletion_email">privacy@evolvesa.co.za</string>
+    <string name="settings_support_subject">EvolveSA support request</string>
+    <string name="settings_deletion_subject">EvolveSA account deletion request</string>
+    <string name="api_key_rejected_message">API key rejected (401). In Settings, set API Key exactly to the connector API_KEY configured on Render (or your host).</string>
+    <string name="credit_email_hint">Lead email (for approval link)</string>
+    <string name="request_credit_consent">Send approval link to lead</string>
 </resources>

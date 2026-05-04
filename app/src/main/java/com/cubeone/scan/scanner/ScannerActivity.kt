@@ -18,6 +18,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.cubeone.scan.ui.LicenseResultActivity
+import com.cubeone.scan.ui.TestDriveActivity
 import com.cubeone.scan.ui.VehicleResultActivity
 import com.cubeone.scan.models.VehicleData
 import android.util.Base64
@@ -129,7 +130,8 @@ class ScannerActivity : AppCompatActivity() {
 
             resultTextView?.text = "Driver license scanned"
 
-            val intent = android.content.Intent(this, LicenseResultActivity::class.java).apply {
+            val destination = if (postScanAction == ACTION_TEST_DRIVE) TestDriveActivity::class.java else LicenseResultActivity::class.java
+            val intent = android.content.Intent(this, destination).apply {
                 putExtra("SUCCESS", true)
                 putExtra("SURNAME", data["SURNAME"] ?: "")
                 putExtra("NAMES", data["NAMES"] ?: "")
@@ -215,6 +217,19 @@ class ScannerActivity : AppCompatActivity() {
 
             resultTextView?.text = "Vehicle barcode scanned"
 
+            if (postScanAction == ACTION_TEST_DRIVE) {
+                val resultIntent = android.content.Intent().apply {
+                    putExtra("REGISTRATION", vehicle.registration)
+                    putExtra("LICENCE_NUMBER", vehicle.licenceNumber)
+                    putExtra("MAKE", vehicle.make)
+                    putExtra("MODEL", vehicle.model)
+                    putExtra("VIN", vehicle.vin)
+                }
+                setResult(RESULT_OK, resultIntent)
+                finish()
+                return@runOnUiThread
+            }
+
             val intent = android.content.Intent(this, VehicleResultActivity::class.java).apply {
                 putExtra("SUCCESS", true)
                 putExtra("REGISTRATION", vehicle.registration)
@@ -290,5 +305,6 @@ class ScannerActivity : AppCompatActivity() {
         const val ACTION_TRADE_IN = "trade_in"
         const val ACTION_SHARE_LEAD = "share_lead"
         const val ACTION_SHARE_STOCK = "share_stock"
+        const val ACTION_TEST_DRIVE = "test_drive"
     }
 }
