@@ -174,6 +174,8 @@ const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").trim().toLowerCas
 const SMTP_USER = (process.env.SMTP_USER || "").trim();
 const SMTP_PASS = (process.env.SMTP_PASS || "").trim();
 const SMTP_FROM_EMAIL = (process.env.SMTP_FROM_EMAIL || "").trim();
+/** Brevo REST API (HTTPS :443). Use on Render free tier — outbound SMTP ports are blocked (ETIMEDOUT). */
+const BREVO_API_KEY = (process.env.BREVO_API_KEY || "").trim();
 const CONSENT_FROM_EMAIL_BY_DEALER_RAW = (process.env.CONSENT_FROM_EMAIL_BY_DEALER || "").trim();
 const COMMAND_MAX_RETRIES = Number(process.env.COMMAND_MAX_RETRIES || 3);
 const COMMAND_RETRY_DELAY_MS = Number(process.env.COMMAND_RETRY_DELAY_MS || 1200);
@@ -1141,6 +1143,15 @@ function smtpConfigured() {
   return Boolean(SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS);
 }
 
+function brevoApiConfigured() {
+  return Boolean(BREVO_API_KEY);
+}
+
+/** Consent email: Brevo HTTPS API and/or classic SMTP (SMTP blocked on Render free web services). */
+function consentEmailDispatchConfigured() {
+  return brevoApiConfigured() || smtpConfigured();
+}
+
 let consentMailer = null;
 function getConsentMailer() {
   if (!smtpConfigured()) return null;
@@ -1171,6 +1182,81 @@ function resolveConsentFromAddress(tenantContext = {}, dealerDisplayName = "Deal
   return `"${dealerDisplayName}" <${fromEmail}>`;
 }
 
+function resolveConsentSenderParts(tenantContext = {}, dealerDisplayName = "Dealership") {
+  const dealerId = String(tenantContext?.dealerId || "").trim();
+  const mappedFrom = dealerId ? String(CONSENT_FROM_EMAIL_BY_DEALER.get(dealerId) || "").trim() : "";
+  const fromEmail = (mappedFrom || SMTP_FROM_EMAIL || SMTP_USER || "").trim();
+  return { name: dealerDisplayName, email: fromEmail };
+}
+
+async function sendConsentEmailViaBrevoApi(
+  consentRecord,
+  recipient,
+  subject,
+  text,
+  html,
+  providerRef,
+  dealerDisplayName
+) {
+  const { name, email: fromEmail } = resolveConsentSenderParts(consentRecord.tenantContext || {}, dealerDisplayName);
+  if (!fromEmail) {
+    return { emailSent: false, providerRef, warning: "brevo_missing_from_email" };
+  }
+  try {
+    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "api-key": BREVO_API_KEY,
+      },
+      body: JSON.stringify({
+        sender: { name, email: fromEmail },
+        to: [{ email: recipient }],
+        subject,
+        textContent: text,
+        htmlContent: html,
+      }),
+    });
+    const raw = await res.text();
+    if (!res.ok) {
+      log("error", "consent_email_brevo_api_failed", {
+        consentId: consentRecord.consentId,
+        to: recipient,
+        httpStatus: res.status,
+        body: raw.slice(0, 500),
+      });
+      return {
+        emailSent: false,
+        providerRef,
+        warning: `brevo_api_${res.status}: ${raw.slice(0, 180)}`,
+      };
+    }
+    let providerMessageId = providerRef;
+    try {
+      const jo = JSON.parse(raw);
+      if (jo.messageId) providerMessageId = String(jo.messageId);
+    } catch (_) {
+      /* ignore */
+    }
+    log("info", "consent_email_sent", {
+      consentId: consentRecord.consentId,
+      to: recipient,
+      dealerId: consentRecord.tenantContext?.dealerId || null,
+      providerRef: providerMessageId,
+      via: "brevo_api",
+    });
+    return { emailSent: true, providerRef: providerMessageId };
+  } catch (e) {
+    log("error", "consent_email_brevo_api_failed", {
+      consentId: consentRecord.consentId,
+      to: recipient,
+      error: e?.message || String(e),
+    });
+    return { emailSent: false, providerRef, warning: e?.message || String(e) };
+  }
+}
+
 async function notifyConsentEmail(consentRecord, approveUrl) {
   const providerRef = `email_${uuidv4()}`;
   const recipient = normalizeEmail(consentRecord.applicant?.email || "");
@@ -1178,15 +1264,16 @@ async function notifyConsentEmail(consentRecord, approveUrl) {
     return { emailSent: false, providerRef, warning: "missing_recipient_email" };
   }
   const dealerDisplayName = resolveDealerDisplayName(consentRecord.tenantContext || {});
-  if (!smtpConfigured()) {
+  if (!consentEmailDispatchConfigured()) {
     log("warn", "consent_email_not_sent_smtp_not_configured", {
       consentId: consentRecord.consentId,
       to: recipient,
       dealerId: consentRecord.tenantContext?.dealerId || null,
+      hint: "Set BREVO_API_KEY (HTTPS) and/or SMTP_* on paid Render or local.",
     });
     return { emailSent: false, providerRef, warning: "smtp_not_configured" };
   }
-  const transporter = getConsentMailer();
+
   const consentExpiry = consentRecord.expiresAt || "";
   const customerName = [consentRecord.applicant?.firstName, consentRecord.applicant?.surname].filter(Boolean).join(" ").trim();
   const subject = `${dealerDisplayName}: Approve your soft credit check`;
@@ -1206,6 +1293,27 @@ async function notifyConsentEmail(consentRecord, approveUrl) {
     `ID: ${consentRecord.applicant?.idNumberMasked || ""}<br/>Valid until: ${consentExpiry}</p>` +
     `<p><a href="${approveUrl}">Review and approve/reject consent</a></p>` +
     `<p>If you did not request this, please ignore this email and contact the dealership.</p>`;
+
+  if (brevoApiConfigured()) {
+    const toDomain = recipient.includes("@") ? recipient.split("@").pop() : "";
+    log("info", "consent_email_send_start", {
+      consentId: consentRecord.consentId,
+      toDomain,
+      via: "brevo_api",
+      dealerId: consentRecord.tenantContext?.dealerId || null,
+    });
+    return await sendConsentEmailViaBrevoApi(
+      consentRecord,
+      recipient,
+      subject,
+      text,
+      html,
+      providerRef,
+      dealerDisplayName
+    );
+  }
+
+  const transporter = getConsentMailer();
   try {
     const toDomain = recipient.includes("@") ? recipient.split("@").pop() : "";
     log("info", "consent_email_send_start", {
@@ -1214,19 +1322,34 @@ async function notifyConsentEmail(consentRecord, approveUrl) {
       smtpHost: SMTP_HOST,
       smtpPort: SMTP_PORT,
       dealerId: consentRecord.tenantContext?.dealerId || null,
+      via: "smtp",
     });
-    const info = await transporter.sendMail({
+    const mailOptions = {
       from: resolveConsentFromAddress(consentRecord.tenantContext || {}, dealerDisplayName),
       to: recipient,
       subject,
       text,
       html,
-    });
+    };
+    const smtpHardTimeoutMs = 50_000;
+    const info = await Promise.race([
+      transporter.sendMail(mailOptions),
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          const err = new Error(
+            `SMTP send exceeded ${smtpHardTimeoutMs}ms (outbound SMTP is often blocked on Render free tier; set BREVO_API_KEY)`
+          );
+          err.code = "ESMTP_HARD_TIMEOUT";
+          reject(err);
+        }, smtpHardTimeoutMs);
+      }),
+    ]);
     log("info", "consent_email_sent", {
       consentId: consentRecord.consentId,
       to: recipient,
       dealerId: consentRecord.tenantContext?.dealerId || null,
       providerRef: info?.messageId || providerRef,
+      via: "smtp",
     });
     return {
       emailSent: true,
@@ -1240,6 +1363,7 @@ async function notifyConsentEmail(consentRecord, approveUrl) {
       code: e?.code || null,
       command: e?.command || null,
       response: e?.response || null,
+      via: "smtp",
     });
     return {
       emailSent: false,
@@ -4384,6 +4508,14 @@ app.post("/api/v1/consents", requireAuth, extractTenantContext, async (req, res)
     });
     persistStore();
 
+    log("info", "consent_create_accepted", {
+      consentId,
+      leadCorrelationId: leadCorrelationId || null,
+      leadId: leadId || null,
+      toDomain: email.includes("@") ? email.split("@").pop() : null,
+      dealerId: String(req.tenantContext?.dealerId || "").trim() || null,
+    });
+
     res.status(201).json({
       ok: true,
       ...consentPublicView(record),
@@ -4401,8 +4533,11 @@ app.post("/api/v1/consents", requireAuth, extractTenantContext, async (req, res)
       tenantContext: req.tenantContext || {},
       expiresAt,
     };
-    setImmediate(() => {
+    // Defer SMTP so the HTTP response can flush first (Render/proxy timeouts).
+    log("info", "consent_email_dispatch_queued", { consentId });
+    setTimeout(() => {
       void (async () => {
+        log("info", "consent_email_dispatch_running", { consentId });
         try {
           const delivery = await notifyConsentEmail(mailPayload, approveUrl);
           const r = consentRecords.get(consentId);
@@ -4451,7 +4586,7 @@ app.post("/api/v1/consents", requireAuth, extractTenantContext, async (req, res)
           persistStore();
         }
       })();
-    });
+    }, 0);
   } catch (e) {
     return sendApiError(req, res, 500, "consent_create_failed", e?.message || String(e));
   }
@@ -4836,7 +4971,14 @@ app.listen(PORT, "0.0.0.0", () => {
     mappedUsers: USER_EMAIL_DEALER_MAP.size,
     tenantConfigSource: TENANT_CONFIG.source,
     consentSmtpConfigured: smtpConfigured(),
+    consentBrevoApiConfigured: brevoApiConfigured(),
+    consentEmailConfigured: consentEmailDispatchConfigured(),
     consentLinkBaseConfigured: Boolean(String(CONSENT_LINK_BASE_URL || "").trim()),
   });
+  if (smtpConfigured() && !brevoApiConfigured()) {
+    log("warn", "connector_consent_email_smtp_only", {
+      note: "Outbound SMTP (25/465/587) is blocked on Render free web services. Set BREVO_API_KEY so consent mail uses Brevo HTTPS API.",
+    });
+  }
 });
 

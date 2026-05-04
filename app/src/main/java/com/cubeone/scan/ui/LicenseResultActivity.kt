@@ -48,6 +48,8 @@ class LicenseResultActivity : AppCompatActivity() {
     private var selectedStock: CommandApiService.StockItem? = null
     private var creditConsentId: String? = null
     private var creditConsentStatus: String = ""
+    private var consentEmailFailureToastShownFor: String? = null
+    private var consentEmailSentToastShownFor: String? = null
     private var senderDisplayName: String = ""
     private var senderDealershipName: String = ""
     private val thumbnailCache: LruCache<String, Bitmap> by lazy {
@@ -329,11 +331,21 @@ class LicenseResultActivity : AppCompatActivity() {
                     creditConsentStatus = resp.status
                     runOnUiThread {
                         renderCreditConsentStatus(resp.status)
-                        Toast.makeText(
-                            this,
-                            getString(R.string.credit_consent_request_sent, resp.consentId),
-                            Toast.LENGTH_LONG
-                        ).show()
+                        val delivery = resp.raw.optJSONObject("delivery")
+                        val dispatch =
+                            delivery?.optString("emailDispatch")?.lowercase(Locale.getDefault()).orEmpty()
+                        val toastText = when (dispatch) {
+                            "failed" -> getString(
+                                R.string.credit_consent_email_failed,
+                                delivery?.optString("warning").orEmpty().ifBlank { "unknown" }
+                            )
+                            "pending", "" -> getString(
+                                R.string.credit_consent_email_dispatching,
+                                resp.consentId
+                            )
+                            else -> getString(R.string.credit_consent_request_sent, resp.consentId)
+                        }
+                        Toast.makeText(this, toastText, Toast.LENGTH_LONG).show()
                     }
                     watchConsentStatus(resp.consentId)
                 },
@@ -580,7 +592,31 @@ class LicenseResultActivity : AppCompatActivity() {
                 val status = resp.status.lowercase(Locale.getDefault())
                 creditConsentId = resp.consentId.ifBlank { consentId }
                 creditConsentStatus = status
-                runOnUiThread { renderCreditConsentStatus(status) }
+                val delivery = resp.raw.optJSONObject("delivery")
+                val dispatch =
+                    delivery?.optString("emailDispatch")?.lowercase(Locale.getDefault()).orEmpty()
+                runOnUiThread {
+                    renderCreditConsentStatus(status)
+                    if (dispatch == "failed" && consentEmailFailureToastShownFor != consentId) {
+                        consentEmailFailureToastShownFor = consentId
+                        Toast.makeText(
+                            this,
+                            getString(
+                                R.string.credit_consent_email_failed,
+                                delivery?.optString("warning").orEmpty().ifBlank { "unknown" }
+                            ),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    if (dispatch == "sent" && consentEmailSentToastShownFor != consentId) {
+                        consentEmailSentToastShownFor = consentId
+                        Toast.makeText(
+                            this,
+                            getString(R.string.credit_consent_email_delivered_hint),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
                 final = status == "approved" || status == "rejected" || status == "expired" || status == "revoked"
                 latch.countDown()
             },
