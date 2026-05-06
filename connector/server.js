@@ -361,12 +361,14 @@ function extractTenantContext(req, res, next) {
     }
 
     // Verified JWT is the operational source of truth; connector USER_EMAIL_DEALER_MAP can lag auth / tenant-config.runtime.
+    // If JWT cannot be verified, prefer the mapped email dealer scope over app header dealer scope.
+    // This avoids false tenant_mismatch blocks caused by stale app-side cached dealer headers.
     if (jwtVerified && tokenDealerCanonical) {
       effectiveDealerId = tokenDealerCanonical;
-    } else if (headerDealerCanonical) {
-      effectiveDealerId = headerDealerCanonical;
     } else if (mappedDealerId) {
       effectiveDealerId = mappedDealerId;
+    } else if (headerDealerCanonical) {
+      effectiveDealerId = headerDealerCanonical;
     }
 
     if (
