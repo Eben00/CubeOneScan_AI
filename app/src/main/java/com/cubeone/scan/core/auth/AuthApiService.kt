@@ -1,6 +1,7 @@
 package com.cubeone.scan.core.auth
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
 import com.cubeone.scan.core.api.ApiClient
 import com.cubeone.scan.services.ApiConfig
@@ -17,6 +18,23 @@ import java.net.URL
 object AuthApiService {
 
     private const val TAG = "AuthApiService"
+
+    /** Unverified decode of JWT payload string claim (issuer signs the token; connector uses the same dealerId claim). */
+    private fun jwtPayloadStringClaim(jwt: String, claim: String): String? {
+        val parts = jwt.split(".")
+        if (parts.size < 2) return null
+        return try {
+            var segment = parts[1].replace('-', '+').replace('_', '/')
+            when (segment.length % 4) {
+                2 -> segment += "=="
+                3 -> segment += "="
+            }
+            val json = String(Base64.decode(segment, Base64.DEFAULT), Charsets.UTF_8)
+            JSONObject(json).optString(claim).trim().takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     private const val DEFAULT_AUTH_BASE_URL = "http://10.0.2.2:4000"
 
@@ -39,11 +57,13 @@ object AuthApiService {
                     if (accessToken.isNullOrBlank()) {
                         AuthResult.Error("No access token returned")
                     } else {
+                        val jwtDealer = jwtPayloadStringClaim(accessToken, "dealerId")
+                        val apiDealer = user?.optString("dealerId")?.trim()?.takeIf { it.isNotEmpty() }
                         AuthResult.Success(
                             accessToken = accessToken,
                             refreshToken = refreshToken,
                             userId = user?.optString("userId"),
-                            dealerId = user?.optString("dealerId"),
+                            dealerId = jwtDealer ?: apiDealer,
                             branchId = user?.optString("branchId"),
                             role = user?.optString("role"),
                             mustChangePassword = user?.optBoolean("mustChangePassword", false) == true

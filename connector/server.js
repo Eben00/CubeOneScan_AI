@@ -177,6 +177,11 @@ const SMTP_FROM_EMAIL = (process.env.SMTP_FROM_EMAIL || "").trim();
 /** Brevo REST API (HTTPS :443). Use on Render free tier — outbound SMTP ports are blocked (ETIMEDOUT). */
 const BREVO_API_KEY = (process.env.BREVO_API_KEY || "").trim();
 const CONSENT_FROM_EMAIL_BY_DEALER_RAW = (process.env.CONSENT_FROM_EMAIL_BY_DEALER || "").trim();
+const CONSENT_APPROVAL_FOLLOWUP_EMAIL_ENABLED =
+  String(process.env.CONSENT_APPROVAL_FOLLOWUP_EMAIL_ENABLED || "0").trim() === "1";
+const CONSENT_POPIA_PRIVACY_URL = (process.env.CONSENT_POPIA_PRIVACY_URL || "").trim();
+const CONSENT_POPIA_NOTICE_URL = (process.env.CONSENT_POPIA_NOTICE_URL || "").trim();
+const CONSENT_POPIA_TERMS_URL = (process.env.CONSENT_POPIA_TERMS_URL || "").trim();
 const COMMAND_MAX_RETRIES = Number(process.env.COMMAND_MAX_RETRIES || 3);
 const COMMAND_RETRY_DELAY_MS = Number(process.env.COMMAND_RETRY_DELAY_MS || 1200);
 const CREDIT_CHECK_MODE = String(process.env.CREDIT_CHECK_MODE || "stub").trim().toLowerCase();
@@ -318,59 +323,110 @@ function canonicalDealerId(value) {
 }
 
 function extractTenantContext(req, res, next) {
-    const userToken = String(req.headers["x-user-token"] || "").trim();
-    let claims = {};
-    if (userToken && AUTH_JWT_SECRET) {
-      try {
-        claims = jwt.verify(userToken, AUTH_JWT_SECRET);
-      } catch (_) {
-        claims = {};
-      }
+  const userToken = String(req.headers["x-user-token"] || "").trim();
+  let claims = {};
+  let jwtVerified = false;
+  if (userToken && AUTH_JWT_SECRET) {
+    try {
+      claims = jwt.verify(userToken, AUTH_JWT_SECRET);
+      jwtVerified = true;
+    } catch (_) {
+      claims = {};
     }
-    const headerDealerId = String(req.headers["x-dealer-id"] || "").trim();
-    const headerBranchId = String(req.headers["x-branch-id"] || "").trim();
-    const headerRole = String(req.headers["x-user-role"] || "").trim();
-    const resolvedUserEmail = String(claims.email || claims.userEmail || req.headers["x-user-email"] || "").trim().toLowerCase();
-    const mappedDealerIdRaw = resolvedUserEmail ? USER_EMAIL_DEALER_MAP.get(resolvedUserEmail) : null;
-    const mappedDealerId = canonicalDealerId(mappedDealerIdRaw);
-    const tokenDealerId = String(claims.dealerId || "").trim();
-    const headerDealerCanonical = canonicalDealerId(headerDealerId);
-    const tokenDealerCanonical = canonicalDealerId(tokenDealerId);
-    if (ENFORCE_TENANT_RINGFENCE && USER_EMAIL_DEALER_MAP.size > 0) {
-      if (!resolvedUserEmail) {
-        return sendApiError(req, res, 403, "tenant_identity_missing", "Missing user email in auth context.");
-      }
-      if (!mappedDealerId) {
-        return sendApiError(req, res, 403, "tenant_not_mapped", "User is not mapped to a dealership in USER_EMAIL_DEALER_MAP.");
-      }
-      if (headerDealerCanonical && headerDealerCanonical !== mappedDealerId) {
-        return sendApiError(req, res, 403, "tenant_mismatch", "Header dealer scope does not match mapped user dealership.");
-      }
-      if (tokenDealerCanonical && tokenDealerCanonical !== mappedDealerId) {
-        return sendApiError(req, res, 403, "tenant_mismatch", "Token dealer scope does not match mapped user dealership.");
-      }
-    }
-    const effectiveDealerId = mappedDealerId || headerDealerCanonical || tokenDealerCanonical || null;
-    if (!headerDealerId && mappedDealerId && String(claims.dealerId || "").trim() !== String(mappedDealerId)) {
-      log("info", "tenant_dealer_overridden_by_email_map", {
-        userEmail: resolvedUserEmail,
-        fromDealerId: String(claims.dealerId || "").trim() || null,
-        toDealerId: mappedDealerId,
+  }
+  const headerDealerId = String(req.headers["x-dealer-id"] || "").trim();
+  const headerBranchId = String(req.headers["x-branch-id"] || "").trim();
+  const headerRole = String(req.headers["x-user-role"] || "").trim();
+  const resolvedUserEmail = String(claims.email || claims.userEmail || req.headers["x-user-email"] || "")
+    .trim()
+    .toLowerCase();
+
+  const mappedDealerIdRaw = resolvedUserEmail ? USER_EMAIL_DEALER_MAP.get(resolvedUserEmail) : null;
+  const mappedDealerId = canonicalDealerId(mappedDealerIdRaw);
+  const tokenDealerId = jwtVerified ? String(claims.dealerId || "").trim() : "";
+  const headerDealerCanonical = canonicalDealerId(headerDealerId);
+  const tokenDealerCanonical = canonicalDealerId(tokenDealerId);
+
+  let effectiveDealerId = "";
+  if (!ENFORCE_TENANT_RINGFENCE) {
+    effectiveDealerId = mappedDealerId || headerDealerCanonical || tokenDealerCanonical || "";
+  } else {
+    if (jwtVerified && tokenDealerCanonical && headerDealerCanonical && headerDealerCanonical !== tokenDealerCanonical) {
+      log("warn", "tenant_scope_header_token_mismatch_using_jwt", {
+        path: req.path || null,
+        method: req.method || null,
+        headerDealerId: headerDealerCanonical,
+        tokenDealerId: tokenDealerCanonical,
       });
     }
-    if (ENFORCE_TENANT_RINGFENCE && !effectiveDealerId) {
+
+    // Verified JWT is the operational source of truth; connector USER_EMAIL_DEALER_MAP can lag auth / tenant-config.runtime.
+    if (jwtVerified && tokenDealerCanonical) {
+      effectiveDealerId = tokenDealerCanonical;
+    } else if (headerDealerCanonical) {
+      effectiveDealerId = headerDealerCanonical;
+    } else if (mappedDealerId) {
+      effectiveDealerId = mappedDealerId;
+    }
+
+    if (
+      USER_EMAIL_DEALER_MAP.size > 0 &&
+      mappedDealerId &&
+      effectiveDealerId &&
+      mappedDealerId !== effectiveDealerId
+    ) {
+      if (jwtVerified && tokenDealerCanonical) {
+        log("warn", "tenant_email_map_conflict_using_jwt", {
+          path: req.path || null,
+          method: req.method || null,
+          email: resolvedUserEmail.replace(/^(.{2}).+(@.*)$/, "$1***$2"),
+          mappedDealerId,
+          tokenDealerId: tokenDealerCanonical,
+        });
+        effectiveDealerId = tokenDealerCanonical;
+      } else {
+        return sendApiError(
+          req,
+          res,
+          403,
+          "tenant_mismatch",
+          "Connector email-to-dealer map does not match this session's dealer scope. Update USER_EMAIL_DEALER_MAP or sign in again."
+        );
+      }
+    }
+
+    if (!effectiveDealerId) {
+      if (USER_EMAIL_DEALER_MAP.size > 0 && resolvedUserEmail && !mappedDealerId) {
+        const redactedEmail = resolvedUserEmail.replace(/^(.{2}).+(@.*)$/, "$1***$2");
+        return sendApiError(
+          req,
+          res,
+          403,
+          "tenant_not_mapped",
+          `User ${redactedEmail} is not mapped in connector and session has no dealer scope.`
+        );
+      }
+      if (USER_EMAIL_DEALER_MAP.size > 0 && !resolvedUserEmail && !jwtVerified && !headerDealerCanonical) {
+        return sendApiError(req, res, 403, "tenant_identity_missing", "Missing user token/email in auth context.");
+      }
       return sendApiError(req, res, 403, "tenant_scope_missing", "Unable to resolve dealership scope for this user.");
     }
-    req.tenantContext = {
-      userId: claims.userId || claims.sub || req.headers["x-user-id"] || null,
-      userEmail: resolvedUserEmail || null,
-      userName: claims.name || claims.displayName || claims.fullName || req.headers["x-user-name"] || null,
-      // Prefer explicit headers from app settings over token claims for tenant scoping.
-      dealerId: effectiveDealerId,
-      branchId: headerBranchId || claims.branchId || null,
-      role: headerRole || claims.role || null,
-    };
-    next();
+  }
+
+  const effectiveOrNull = effectiveDealerId || null;
+  if (ENFORCE_TENANT_RINGFENCE && !effectiveOrNull) {
+    return sendApiError(req, res, 403, "tenant_scope_missing", "Unable to resolve dealership scope for this user.");
+  }
+
+  req.tenantContext = {
+    userId: claims.userId || claims.sub || req.headers["x-user-id"] || null,
+    userEmail: resolvedUserEmail || null,
+    userName: claims.name || claims.displayName || claims.fullName || req.headers["x-user-name"] || null,
+    dealerId: effectiveOrNull,
+    branchId: headerBranchId || claims.branchId || null,
+    role: headerRole || claims.role || null,
+  };
+  next();
 }
 
 const BUSINESS_ROLES = ["dealer_principal", "sales_manager", "sales_person"];
@@ -391,11 +447,18 @@ const REQUEST_TO_COMMAND = {
   TRADE_IN_REQUEST: "TRADE_IN",
   STOCK_TAKE_REQUEST: "STOCK_TAKE",
 };
+const LEAD_OWNERSHIP_ENFORCED_COMMANDS = new Set([
+  "CREDIT_CHECK",
+  "SHARE_LEAD",
+  "LOG_COMMUNICATION",
+  "SEND_STOCK_TO_LEAD",
+]);
 
 function normalizeRole(rawRole) {
   const role = String(rawRole || "").trim().toLowerCase();
   if (BUSINESS_ROLES.includes(role)) return role;
-  if (["admin", "owner", "superadmin"].includes(role)) return "dealer_principal";
+  if (["admin", "owner", "superadmin", "tenant_admin_editor", "tenant_admin_approver"].includes(role)) return "dealer_principal";
+  if (["manager", "sales-manager", "sales manager"].includes(role)) return "sales_manager";
   if (role === "agent") return "sales_person";
   return "sales_person";
 }
@@ -454,6 +517,8 @@ const alertRules = new Map(); // ruleId -> alert rule
 const testDriveSessions = new Map(); // sessionId -> test-drive safety sessions
 const consentRecords = new Map(); // consentId -> consent record
 const consentEvents = []; // append-only audit trail
+const leadOwnerByLeadId = new Map(); // leadId -> { ownerUserId, ownerEmail, ownerName, dealerId, branchId, assignedAt }
+const leadOwnerByCorrelationId = new Map(); // create-lead correlationId -> lead owner
 const autoTraderListingsCache = {
   fetchedAtMs: 0,
   rows: [],
@@ -738,6 +803,8 @@ function persistStore() {
     testDriveSessions: Array.from(testDriveSessions.values()),
     consentRecords: Array.from(consentRecords.values()),
     consentEvents: consentEvents.slice(-CONSENT_EVENTS_STORE_CAP),
+    leadOwnerByLeadId: Object.fromEntries(leadOwnerByLeadId.entries()),
+    leadOwnerByCorrelationId: Object.fromEntries(leadOwnerByCorrelationId.entries()),
   };
   fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2), "utf8");
 }
@@ -784,6 +851,14 @@ function loadStore() {
   for (const td of parsed.testDriveSessions || []) {
     if (td?.sessionId) testDriveSessions.set(String(td.sessionId), td);
   }
+  for (const [leadId, owner] of Object.entries(parsed.leadOwnerByLeadId || {})) {
+    if (!leadId || !owner || typeof owner !== "object") continue;
+    leadOwnerByLeadId.set(String(leadId), owner);
+  }
+  for (const [corr, owner] of Object.entries(parsed.leadOwnerByCorrelationId || {})) {
+    if (!corr || !owner || typeof owner !== "object") continue;
+    leadOwnerByCorrelationId.set(String(corr), owner);
+  }
 }
 
 function normalizeCommandBody(body) {
@@ -810,7 +885,36 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function validateCommandPayload(commandType, payload) {
+function creditCheckMissingConsentHint(payload, tenantContext) {
+  const leadCorr = String(payload?.leadCorrelationId || "").trim();
+  const leadIdKey = String(payload?.leadId || "").trim();
+  if (!leadCorr && !leadIdKey) return "";
+  let pending = false;
+  let approved = false;
+  for (const c of consentRecords.values()) {
+    if (tenantContext && !canAccessTenantScopedRecord(c.tenantContext || {}, tenantContext || {})) continue;
+    const st = String(c.status || "").toLowerCase();
+    const ccorr = String(c.leadCorrelationId || "").trim();
+    const cid = String(c.leadId || "").trim();
+    const matches =
+      (leadCorr && ccorr && leadCorr === ccorr) || (leadIdKey && cid && leadIdKey === cid);
+    if (!matches) continue;
+    if (st === "pending") pending = true;
+    if (st === "approved") approved = true;
+  }
+  if (pending) {
+    return " For this lead, consent is still pending — wait for the customer to approve the email link, then retry (app must send payload.consentId).";
+  }
+  if (!pending && !approved) {
+    return " No consent record for this lead yet — tap “Send approval link” in the app before running a credit check.";
+  }
+  if (approved) {
+    return " An approved consent exists for this lead but consentId was not sent — update the mobile app or connector to the latest build.";
+  }
+  return "";
+}
+
+function validateCommandPayload(commandType, payload, tenantContext = null) {
   if (!isPlainObject(payload)) {
     return { error: "payload must be a JSON object" };
   }
@@ -836,10 +940,12 @@ function validateCommandPayload(commandType, payload) {
         isPlainObject(inlineConsent) &&
         (inlineConsent.accepted === true || String(inlineConsent.accepted || "").toLowerCase() === "true");
       if (!consentId && !inlineAccepted) {
+        const extra = creditCheckMissingConsentHint(payload, tenantContext);
         return {
           error: "invalid_payload",
           hint:
-            "CREDIT_CHECK requires payload.consentId (email approval) or payload.consent.accepted=true (in-app checkbox).",
+            "CREDIT_CHECK requires payload.consentId (email approval) or payload.consent.accepted=true (in-app checkbox)." +
+            extra,
         };
       }
       const applicant = payload.applicant || {};
@@ -1373,6 +1479,112 @@ async function notifyConsentEmail(consentRecord, approveUrl) {
   }
 }
 
+async function sendConsentApprovalFollowupEmail(consentRecord) {
+  if (!CONSENT_APPROVAL_FOLLOWUP_EMAIL_ENABLED) {
+    return { emailSent: false, providerRef: null, warning: "followup_disabled" };
+  }
+  const recipient = normalizeEmail(consentRecord?.applicant?.email || "");
+  if (!recipient) {
+    return { emailSent: false, providerRef: null, warning: "missing_recipient_email" };
+  }
+  const dealerDisplayName = resolveDealerDisplayName(consentRecord?.tenantContext || {});
+  const customerName = [consentRecord?.applicant?.firstName, consentRecord?.applicant?.surname].filter(Boolean).join(" ").trim();
+  const lines = [];
+  if (CONSENT_POPIA_NOTICE_URL) lines.push(`POPIA consent notice: ${CONSENT_POPIA_NOTICE_URL}`);
+  if (CONSENT_POPIA_PRIVACY_URL) lines.push(`Privacy policy: ${CONSENT_POPIA_PRIVACY_URL}`);
+  if (CONSENT_POPIA_TERMS_URL) lines.push(`Terms of processing: ${CONSENT_POPIA_TERMS_URL}`);
+  const docsText = lines.length > 0 ? `\n\nDocuments:\n${lines.join("\n")}` : "";
+  const docsHtml = [
+    CONSENT_POPIA_NOTICE_URL ? `<li><a href="${CONSENT_POPIA_NOTICE_URL}">POPIA consent notice</a></li>` : "",
+    CONSENT_POPIA_PRIVACY_URL ? `<li><a href="${CONSENT_POPIA_PRIVACY_URL}">Privacy policy</a></li>` : "",
+    CONSENT_POPIA_TERMS_URL ? `<li><a href="${CONSENT_POPIA_TERMS_URL}">Terms of processing</a></li>` : "",
+  ].filter(Boolean).join("");
+  const subject = `${dealerDisplayName}: Thank you for approving your soft credit check`;
+  const text =
+    `Hi ${customerName || "Customer"},\n\n` +
+    `Thank you for approving the soft credit check request.\n` +
+    `Reference: ${consentRecord?.consentId || ""}\n` +
+    `Approved at: ${consentRecord?.approvedAt || new Date().toISOString()}` +
+    docsText +
+    `\n\nIf you need assistance, please contact ${dealerDisplayName}.`;
+  const html =
+    `<p>Hi ${customerName || "Customer"},</p>` +
+    `<p>Thank you for approving the soft credit-check request.</p>` +
+    `<p>Reference: <strong>${consentRecord?.consentId || ""}</strong><br/>Approved at: ${consentRecord?.approvedAt || new Date().toISOString()}</p>` +
+    (docsHtml ? `<p>Please review the following POPIA-related documents:</p><ul>${docsHtml}</ul>` : "") +
+    `<p>If you need assistance, please contact ${dealerDisplayName}.</p>`;
+
+  const providerRef = `email_followup_${uuidv4()}`;
+  if (brevoApiConfigured()) {
+    return await sendConsentEmailViaBrevoApi(
+      consentRecord,
+      recipient,
+      subject,
+      text,
+      html,
+      providerRef,
+      dealerDisplayName
+    );
+  }
+  const transporter = getConsentMailer();
+  if (!transporter) {
+    return { emailSent: false, providerRef, warning: "smtp_not_configured" };
+  }
+  try {
+    const info = await transporter.sendMail({
+      from: resolveConsentFromAddress(consentRecord?.tenantContext || {}, dealerDisplayName),
+      to: recipient,
+      subject,
+      text,
+      html,
+    });
+    return { emailSent: true, providerRef: info?.messageId || providerRef };
+  } catch (e) {
+    return { emailSent: false, providerRef, warning: e?.message || String(e) };
+  }
+}
+
+/**
+ * If the app omitted consentId after a refresh, locate the dealer-scoped APPROVED consent for this lead.
+ */
+function inferApprovedConsentIdForCreditCheck(payload, tenantContext) {
+  if (!isPlainObject(payload)) return null;
+  if (String(payload.consentId || "").trim()) return null;
+  const inlineConsent = payload.consent;
+  const inlineAccepted =
+    isPlainObject(inlineConsent) &&
+    (inlineConsent.accepted === true || String(inlineConsent.accepted || "").toLowerCase() === "true");
+  if (inlineAccepted) return null;
+
+  const leadCorr = String(payload.leadCorrelationId || "").trim();
+  const leadId = String(payload.leadId || "").trim();
+  if (!leadCorr && !leadId) return null;
+
+  const candidates = [];
+  for (const consent of consentRecords.values()) {
+    if (String(consent.status || "").toLowerCase() !== "approved") continue;
+    if (!canAccessTenantScopedRecord(consent.tenantContext || {}, tenantContext || {})) continue;
+    if (consent.expiresAt && Date.parse(consent.expiresAt) <= Date.now()) continue;
+    if (consent.revokedAt) continue;
+
+    const ccorr = String(consent.leadCorrelationId || "").trim();
+    const cid = String(consent.leadId || "").trim();
+
+    let match = false;
+    if (leadCorr && ccorr && leadCorr === ccorr) match = true;
+    else if (leadId && cid && leadId === cid) match = true;
+    if (!match) continue;
+
+    candidates.push({
+      consentId: String(consent.consentId || "").trim(),
+      t: consent.approvedAt ? Date.parse(consent.approvedAt) || 0 : 0,
+    });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.t - a.t);
+  return candidates[0].consentId || null;
+}
+
 function resolveApprovedConsent(payload, tenantContext) {
   const consentId = String(payload?.consentId || "").trim();
   if (!consentId) {
@@ -1394,10 +1606,18 @@ function resolveApprovedConsent(payload, tenantContext) {
   if (consent.revokedAt) {
     throw new Error("Consent has been revoked");
   }
-  const payloadLead = String(payload?.leadCorrelationId || payload?.leadId || "").trim();
-  const consentLead = String(consent.leadCorrelationId || consent.leadId || "").trim();
-  if (payloadLead && consentLead && payloadLead !== consentLead) {
-    throw new Error("Consent does not match the requested lead");
+  const payloadCorr = String(payload?.leadCorrelationId || "").trim();
+  const payloadId = String(payload?.leadId || "").trim();
+  const consentCorr = String(consent.leadCorrelationId || "").trim();
+  const consentLeadIdField = String(consent.leadId || "").trim();
+  const anyPayloadLead = Boolean(payloadCorr || payloadId);
+  const anyConsentLead = Boolean(consentCorr || consentLeadIdField);
+  if (anyPayloadLead && anyConsentLead) {
+    const corrMatch = Boolean(payloadCorr && consentCorr && payloadCorr === consentCorr);
+    const idMatch = Boolean(payloadId && consentLeadIdField && payloadId === consentLeadIdField);
+    if (!corrMatch && !idMatch) {
+      throw new Error("Consent does not match the requested lead");
+    }
   }
   return consent;
 }
@@ -1538,6 +1758,61 @@ function createOrUpdateCommand(record) {
     idempotencyIndex.set(record.idempotencyKey, record.correlationId);
   }
   persistStore();
+}
+
+function resolveLeadOwner(payload = {}) {
+  const leadId = String(payload?.leadId || "").trim();
+  if (leadId && leadOwnerByLeadId.has(leadId)) {
+    return leadOwnerByLeadId.get(leadId);
+  }
+  const corr = String(payload?.leadCorrelationId || "").trim();
+  if (corr && leadOwnerByCorrelationId.has(corr)) {
+    return leadOwnerByCorrelationId.get(corr);
+  }
+  if (corr && commands.has(corr)) {
+    const c = commands.get(corr);
+    const resolvedLeadId = String(c?.result?.leadId || "").trim();
+    if (resolvedLeadId && leadOwnerByLeadId.has(resolvedLeadId)) {
+      return leadOwnerByLeadId.get(resolvedLeadId);
+    }
+  }
+  return null;
+}
+
+function assignLeadOwnerIndex(correlationId, leadId, tenantContext = {}) {
+  const owner = {
+    ownerUserId: tenantContext?.userId || null,
+    ownerEmail: String(tenantContext?.userEmail || "").trim().toLowerCase() || null,
+    ownerName: tenantContext?.userName || null,
+    ownerRole: normalizeRole(tenantContext?.role),
+    dealerId: String(tenantContext?.dealerId || "").trim() || null,
+    branchId: String(tenantContext?.branchId || "").trim() || null,
+    assignedAt: new Date().toISOString(),
+  };
+  const corr = String(correlationId || "").trim();
+  const lid = String(leadId || "").trim();
+  if (corr) leadOwnerByCorrelationId.set(corr, owner);
+  if (lid) leadOwnerByLeadId.set(lid, owner);
+}
+
+function enforceLeadOwnershipForCommand(commandType, payload = {}, tenantContext = {}) {
+  if (!LEAD_OWNERSHIP_ENFORCED_COMMANDS.has(commandType)) return null;
+  const role = normalizeRole(tenantContext?.role);
+  if (role !== "sales_person") return null;
+  const owner = resolveLeadOwner(payload);
+  if (!owner) return null;
+  const actorUserId = tenantContext?.userId || null;
+  const actorEmail = String(tenantContext?.userEmail || "").trim().toLowerCase();
+  const ownerUserId = owner?.ownerUserId || null;
+  const ownerEmail = String(owner?.ownerEmail || "").trim().toLowerCase();
+  const sameUserId = Boolean(actorUserId && ownerUserId && actorUserId === ownerUserId);
+  const sameEmail = Boolean(actorEmail && ownerEmail && actorEmail === ownerEmail);
+  if (sameUserId || sameEmail) return null;
+  const label = owner?.ownerName || ownerEmail || ownerUserId || "another consultant";
+  return {
+    error: "lead_ownership_forbidden",
+    hint: `This lead is owned by ${label}. Ask a sales manager or dealer principal to reassign it.`,
+  };
 }
 
 function pushDeadLetter(record, errorMessage) {
@@ -2960,6 +3235,7 @@ async function processCommand(commandType, payload) {
     case "CREATE_LEAD": {
       const provider = resolveCrmProvider(payload?._tenantContext || {});
       const lead = await provider.createLead(payload);
+      const tc = payload?._tenantContext || {};
       result.leadId = lead.leadId;
       result.provider = lead.provider || provider.providerName || "EvolveSA";
       result.mode = lead.mode;
@@ -2967,6 +3243,14 @@ async function processCommand(commandType, payload) {
       if (lead.rawRef) result.rawRef = lead.rawRef;
       if (lead.debug) result.evolvesaDebug = lead.debug;
       result.lead = payload?.driverLicense || payload?.lead || {};
+      result.leadOwner = {
+        ownerUserId: tc.userId || null,
+        ownerEmail: String(tc.userEmail || "").trim().toLowerCase() || null,
+        ownerName: tc.userName || null,
+        ownerRole: normalizeRole(tc.role),
+        dealerId: String(tc.dealerId || "").trim() || null,
+        branchId: String(tc.branchId || "").trim() || null,
+      };
       return result;
     }
     case "CREDIT_CHECK": {
@@ -3308,6 +3592,16 @@ async function processCommand(commandType, payload) {
       throw new Error(`Unknown commandType: ${commandType}`);
   }
 }
+
+app.get("/", (req, res) => {
+  res.type("application/json").json({
+    ok: true,
+    service: "cubeone-scan-connector",
+    hint: "API routes live under /api/v1. Use GET /healthz for a quick up-check.",
+    health: "/healthz",
+    ready: "/readyz",
+  });
+});
 
 app.get("/healthz", (req, res) => {
   res.json({ ok: true });
@@ -4433,7 +4727,18 @@ app.post("/api/v1/consents", requireAuth, extractTenantContext, async (req, res)
       const existingLead = String(existing.leadCorrelationId || existing.leadId || "").trim();
       const incomingLead = String(leadCorrelationId || leadId).trim();
       if (existingLead && incomingLead && existingLead === incomingLead && existing.purpose === purpose) {
-        return sendApiError(req, res, 409, "duplicate_pending_consent", "A pending consent already exists for this lead.");
+        // Idempotent "send again": mobile clients may lose in-memory state; return the open request instead of 409.
+        log("info", "consent_create_reused_pending", {
+          consentId: existing.consentId,
+          leadCorrelationId: existing.leadCorrelationId || null,
+          leadId: existing.leadId || null,
+          dealerId: String(req.tenantContext?.dealerId || "").trim() || null,
+        });
+        return res.status(200).json({
+          ok: true,
+          reusedPendingConsent: true,
+          ...consentPublicView(existing),
+        });
       }
     }
 
@@ -4639,7 +4944,55 @@ app.post("/api/v1/consents/:consentId/revoke", requireAuth, extractTenantContext
   return res.json({ ok: true, ...consentPublicView(record) });
 });
 
-app.get("/consent/approve", (req, res) => {
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Public form posts are urlencoded; send HTML unless the client explicitly wants JSON only (API / curl). */
+function wantsConsentApproveHtml(req) {
+  const ct = String(req.headers["content-type"] || "").toLowerCase();
+  if (!ct.includes("application/x-www-form-urlencoded")) return false;
+  const accept = String(req.headers.accept || "").trim();
+  const a = accept.toLowerCase();
+  if (!a || a.includes("text/html") || a.includes("application/xhtml+xml") || a.includes("*/*")) {
+    return true;
+  }
+  const jsonOnly = /\bapplication\/json\b/i.test(accept) && !/\btext\/html\b/i.test(a);
+  return !jsonOnly;
+}
+
+function setConsentApproveNoStore(res) {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  res.set("Pragma", "no-cache");
+  res.set("Expires", "0");
+}
+
+function sendConsentApprovePage(res, httpStatus, title, innerHtml) {
+  setConsentApproveNoStore(res);
+  res
+    .status(httpStatus)
+    .type("html")
+    .send(
+      `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
+        `<meta name="viewport" content="width=device-width, initial-scale=1">` +
+        `<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:28rem;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#111}` +
+        `h1{font-size:1.25rem}p{color:#444}</style></head><body>` +
+        `<h1>${escapeHtml(title)}</h1>${innerHtml}</body></html>`
+    );
+}
+
+const consentApproveRouter = express.Router();
+consentApproveRouter.use((req, res, next) => {
+  setConsentApproveNoStore(res);
+  next();
+});
+app.use("/consent/approve", consentApproveRouter);
+
+consentApproveRouter.get("/", (req, res) => {
   const token = String(req.query.token || "").trim();
   if (!token) {
     return res.status(400).send("Missing token.");
@@ -4653,32 +5006,124 @@ app.get("/consent/approve", (req, res) => {
     if (record.expiresAt && Date.parse(record.expiresAt) <= nowMs) {
       return res.status(410).send("Consent link has expired.");
     }
+    const st = String(record.status || "").toLowerCase();
+    if (st === "approved") {
+      return sendConsentApprovePage(
+        res,
+        200,
+        "Already approved",
+        `<p>Your approval for this soft credit-check request is already on record.</p>` +
+          `<p>Reference: <strong>${escapeHtml(consentId)}</strong></p>` +
+          `<p>You can close this page.</p>`
+      );
+    }
+    if (st === "rejected") {
+      return sendConsentApprovePage(
+        res,
+        200,
+        "Already declined",
+        `<p>You have already declined this credit-check request.</p>` +
+          `<p>Reference: <strong>${escapeHtml(consentId)}</strong></p>` +
+          `<p>You can close this page.</p>`
+      );
+    }
+    if (st === "expired" || st === "revoked") {
+      return sendConsentApprovePage(
+        res,
+        410,
+        "No longer active",
+        `<p>This consent request is no longer active (status: <strong>${escapeHtml(record.status)}</strong>). ` +
+          `Please contact the dealership if you still need assistance.</p>`
+      );
+    }
+    const tokenEsc = escapeHtml(token);
     return res.status(200).send(
-      `<html><body><h3>Credit consent approval</h3><p>Consent ID: ${consentId}</p><p>Status: ${String(record.status || "")}</p>` +
-      `<form method="post" action="/consent/approve"><input type="hidden" name="token" value="${token}" />` +
-      `<button type="submit" name="decision" value="approve">Approve</button>` +
-      `<button type="submit" name="decision" value="reject">Reject</button></form></body></html>`
+      `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Credit consent</title>` +
+        `<meta name="viewport" content="width=device-width, initial-scale=1">` +
+        `<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:28rem;margin:2rem auto;padding:0 1rem;line-height:1.5}` +
+        `button{margin-right:0.5rem;margin-top:0.5rem;padding:0.5rem 0.85rem;font-size:1rem}</style></head><body>` +
+        `<h1>Credit consent</h1><p><strong>${escapeHtml(consentId)}</strong> — review and respond below.</p>` +
+        `<form method="post" action="/consent/approve">` +
+        `<input type="hidden" name="token" value="${tokenEsc}" />` +
+        `<button type="submit" name="decision" value="approve">Approve</button>` +
+        `<button type="submit" name="decision" value="reject">Reject</button>` +
+        `</form></body></html>`
     );
   } catch (e) {
     return res.status(400).send("Invalid or expired token.");
   }
 });
 
-app.post("/consent/approve", (req, res) => {
+consentApproveRouter.post("/", (req, res) => {
+  const html = wantsConsentApproveHtml(req);
   try {
     const token = String(req.body?.token || "").trim();
     const decision = String(req.body?.decision || "").trim().toLowerCase();
-    if (!token) return res.status(400).json({ ok: false, error: "invalid_token" });
+    if (!token) {
+      if (html) {
+        return sendConsentApprovePage(res, 400, "Consent link error", `<p>${escapeHtml("Missing token.")}</p>`);
+      }
+      return res.status(400).json({ ok: false, error: "invalid_token" });
+    }
     if (decision !== "approve" && decision !== "reject") {
+      if (html) {
+        return sendConsentApprovePage(
+          res,
+          400,
+          "Consent link error",
+          `<p>${escapeHtml("Choose Approve or Reject.")}</p>`
+        );
+      }
       return res.status(400).json({ ok: false, error: "invalid_decision" });
     }
     const decoded = verifyConsentToken(token);
     const consentId = String(decoded?.cid || "").trim();
     const record = consentRecords.get(consentId);
-    if (!record) return res.status(404).json({ ok: false, error: "consent_not_found" });
+    if (!record) {
+      if (html) {
+        return sendConsentApprovePage(res, 404, "Consent not found", `<p>This consent request is not available.</p>`);
+      }
+      return res.status(404).json({ ok: false, error: "consent_not_found" });
+    }
     const status = String(record.status || "").toLowerCase();
     if (status !== "pending") {
-      return res.status(409).json({ ok: false, error: "consent_already_finalized", status: record.status });
+      const sameOutcome =
+        (decision === "approve" && status === "approved") ||
+        (decision === "reject" && status === "rejected");
+      if (sameOutcome) {
+        const view = consentPublicView(record);
+        if (html) {
+          const verb = decision === "approve" ? "approved" : "rejected";
+          return sendConsentApprovePage(
+            res,
+            200,
+            decision === "approve" ? "Thank you" : "Recorded",
+            `<p>${decision === "approve" ? "Your approval is already on file (e.g. double-tap or refresh). Nothing more to do." : "Your decline is already on file (e.g. double-tap or refresh). Nothing more to do."}</p>` +
+              `<p>Reference: <strong>${escapeHtml(view.consentId)}</strong><br/>Status: <strong>${escapeHtml(view.status)}</strong></p>` +
+              `<p>You can close this page.</p>`
+          );
+        }
+        return res.json({
+          ok: true,
+          idempotentReplay: true,
+          ...view,
+        });
+      }
+      if (html) {
+        return sendConsentApprovePage(
+          res,
+          409,
+          "Already completed",
+          `<p>This consent was already finalized (status: <strong>${escapeHtml(record.status)}</strong>). ` +
+            `You cannot submit a different choice with this link.</p>`
+        );
+      }
+      return res.status(409).json({
+        ok: false,
+        error: "consent_already_finalized",
+        status: record.status,
+        attemptedDecision: decision,
+      });
     }
     const nowIso = new Date().toISOString();
     if (record.expiresAt && Date.parse(record.expiresAt) <= Date.now()) {
@@ -4687,6 +5132,14 @@ app.post("/consent/approve", (req, res) => {
       consentRecords.set(consentId, record);
       appendConsentEvent(consentId, "expired", {});
       persistStore();
+      if (html) {
+        return sendConsentApprovePage(
+          res,
+          410,
+          "Link expired",
+          `<p>This consent link has expired. Please contact the dealership for a new request.</p>`
+        );
+      }
       return res.status(410).json({ ok: false, error: "consent_expired" });
     }
     record.status = decision === "approve" ? "approved" : "rejected";
@@ -4704,16 +5157,59 @@ app.post("/consent/approve", (req, res) => {
       userAgent: req.headers["user-agent"] || null,
     });
     persistStore();
+    if (decision === "approve") {
+      // Best-effort follow-up; do not block approval response on email delivery.
+      setTimeout(() => {
+        void (async () => {
+          try {
+            const followup = await sendConsentApprovalFollowupEmail(record);
+            log("info", "consent_approval_followup_email", {
+              consentId,
+              emailSent: Boolean(followup?.emailSent),
+              providerRef: followup?.providerRef || null,
+              warning: followup?.warning || null,
+            });
+          } catch (e) {
+            log("warn", "consent_approval_followup_email_failed", {
+              consentId,
+              error: e?.message || String(e),
+            });
+          }
+        })();
+      }, 0);
+    }
+    const view = consentPublicView(record);
+    if (html) {
+      const verb = decision === "approve" ? "approved" : "rejected";
+      return sendConsentApprovePage(
+        res,
+        200,
+        verb === "approved" ? "Thank you" : "Recorded",
+        decision === "approve"
+          ? `<p>Thank you for approving this request.</p><p>You can close this page.</p>`
+          : `<p>Your response has been recorded.</p><p>You can close this page.</p>`
+      );
+    }
     return res.json({
       ok: true,
-      ...consentPublicView(record),
+      ...view,
     });
   } catch (e) {
     const raw = String(e?.message || e || "");
     const status = raw.includes("expired") ? 410 : 400;
+    const errCode = raw.includes("expired") ? "token_expired" : "invalid_token";
+    if (html) {
+      const title = status === 410 ? "Link expired" : "Invalid link";
+      return sendConsentApprovePage(
+        res,
+        status,
+        title,
+        `<p>${escapeHtml(raw.includes("expired") ? "This link has expired." : "This link is invalid or has expired.")}</p>`
+      );
+    }
     return res.status(status).json({
       ok: false,
-      error: raw.includes("expired") ? "token_expired" : "invalid_token",
+      error: errCode,
       detail: raw,
     });
   }
@@ -4725,17 +5221,32 @@ app.post("/api/v1/commands", requireAuth, extractTenantContext, async (req, res)
     return sendApiError(req, res, 400, normalized.error);
   }
 
-  const { commandType, correlationId, payload, meta } = normalized;
+  let { commandType, correlationId, payload, meta } = normalized;
   if (!SUBMITTABLE_COMMANDS.has(commandType)) {
     return sendApiError(req, res, 400, "unsupported_command_type", `Allowed commandType values: ${Array.from(SUBMITTABLE_COMMANDS).join(", ")}`);
   }
-  const payloadValidation = validateCommandPayload(commandType, payload);
+  if (commandType === "CREATE_LEAD" && isPlainObject(payload)) {
+    // Normalize source for scan-captured leads; downstream analytics should not classify these as portal imports.
+    payload.source = "CubeOneScan";
+    payload.leadSource = "id_scan";
+  }
+  if (commandType === "CREDIT_CHECK" && isPlainObject(payload)) {
+    const inferredConsent = inferApprovedConsentIdForCreditCheck(payload, req.tenantContext);
+    if (inferredConsent) {
+      payload.consentId = inferredConsent;
+    }
+  }
+  const payloadValidation = validateCommandPayload(commandType, payload, req.tenantContext);
   if (payloadValidation) {
     return sendApiError(req, res, 400, payloadValidation.error, payloadValidation.hint || null);
   }
   const role = normalizeRole(req.tenantContext?.role);
   if (!canSubmitCommand(role, commandType)) {
     return sendApiError(req, res, 403, "forbidden", `role ${role} cannot submit ${commandType}`);
+  }
+  const ownershipCheck = enforceLeadOwnershipForCommand(commandType, payload, req.tenantContext);
+  if (ownershipCheck) {
+    return sendApiError(req, res, 403, ownershipCheck.error, ownershipCheck.hint);
   }
   if (requiresManagerApproval(role, commandType)) {
     const requestType = `${commandType}_REQUEST`;
@@ -4842,6 +5353,9 @@ app.post("/api/v1/commands", requireAuth, extractTenantContext, async (req, res)
         record.status = "done";
         record.updatedAt = new Date().toISOString();
         record.result = result;
+        if (record.commandType === "CREATE_LEAD" && result?.leadId) {
+          assignLeadOwnerIndex(record.correlationId, result.leadId, record.tenantContext || {});
+        }
         createOrUpdateCommand(record);
         log("info", "command_completed", {
           correlationId: record.correlationId,
@@ -4883,10 +5397,13 @@ app.post("/api/v1/commands", requireAuth, extractTenantContext, async (req, res)
   });
 });
 
-app.get("/api/v1/commands/:correlationId", requireAuth, (req, res) => {
+app.get("/api/v1/commands/:correlationId", requireAuth, extractTenantContext, (req, res) => {
   const correlationId = req.params.correlationId;
   const record = commands.get(correlationId);
   if (!record) return sendApiError(req, res, 404, "not_found");
+  if (!canAccessTenantScopedRecord(record.tenantContext || {}, req.tenantContext || {})) {
+    return sendApiError(req, res, 403, "forbidden", "Command does not belong to current tenant scope.");
+  }
   return res.json({
     correlationId: record.correlationId,
     status: record.status,
@@ -4902,10 +5419,13 @@ app.get("/api/v1/commands/:correlationId", requireAuth, (req, res) => {
   });
 });
 
-app.get("/api/v1/debug/evolvesa/:correlationId", requireAuth, (req, res) => {
+app.get("/api/v1/debug/evolvesa/:correlationId", requireAuth, extractTenantContext, (req, res) => {
   const correlationId = req.params.correlationId;
   const record = commands.get(correlationId);
   if (!record) return res.status(404).json({ error: "not_found" });
+  if (!canAccessTenantScopedRecord(record.tenantContext || {}, req.tenantContext || {})) {
+    return res.status(403).json({ error: "forbidden", hint: "tenant_scope_mismatch" });
+  }
   if (record.commandType !== "CREATE_LEAD") {
     return res.status(400).json({ error: "not_create_lead" });
   }
@@ -4924,10 +5444,13 @@ app.get("/api/v1/debug/evolvesa/:correlationId", requireAuth, (req, res) => {
   });
 });
 
-app.get("/api/v1/debug/evolvesa-stock/:correlationId", requireAuth, (req, res) => {
+app.get("/api/v1/debug/evolvesa-stock/:correlationId", requireAuth, extractTenantContext, (req, res) => {
   const correlationId = req.params.correlationId;
   const record = commands.get(correlationId);
   if (!record) return res.status(404).json({ error: "not_found" });
+  if (!canAccessTenantScopedRecord(record.tenantContext || {}, req.tenantContext || {})) {
+    return res.status(403).json({ error: "forbidden", hint: "tenant_scope_mismatch" });
+  }
   if (record.commandType !== "CREATE_STOCK_UNIT") {
     return res.status(400).json({ error: "not_create_stock_unit" });
   }
@@ -4974,6 +5497,7 @@ app.listen(PORT, "0.0.0.0", () => {
     consentBrevoApiConfigured: brevoApiConfigured(),
     consentEmailConfigured: consentEmailDispatchConfigured(),
     consentLinkBaseConfigured: Boolean(String(CONSENT_LINK_BASE_URL || "").trim()),
+    consentApprovalFollowupEnabled: CONSENT_APPROVAL_FOLLOWUP_EMAIL_ENABLED,
   });
   if (smtpConfigured() && !brevoApiConfigured()) {
     log("warn", "connector_consent_email_smtp_only", {
