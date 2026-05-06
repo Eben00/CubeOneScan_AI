@@ -43,11 +43,17 @@ class LicenseResultActivity : AppCompatActivity() {
     private companion object {
         const val COMM_PREFS = "lead_comm_log"
         const val COMM_LAST_TEXT = "last_text"
+        /** Polling cadence × rounds ≈ 4 min — customer approval often happens after backgrounding the app. */
+        const val CONSENT_POLL_MAX_ROUNDS = 96
+        /** Credit checks can take longer on cloud latency / provider load; poll up to ~90s. */
+        const val CREDIT_CHECK_POLL_MAX_ROUNDS = 60
     }
     private var selectedShareImageUri: Uri? = null
     private var selectedStock: CommandApiService.StockItem? = null
     private var creditConsentId: String? = null
     private var creditConsentStatus: String = ""
+    private val consentPollLock = Any()
+    private var consentPollRunning = false
     private var consentEmailFailureToastShownFor: String? = null
     private var consentEmailSentToastShownFor: String? = null
     private var senderDisplayName: String = ""
@@ -158,7 +164,10 @@ class LicenseResultActivity : AppCompatActivity() {
             if (emailConsentFlow) View.VISIBLE else View.GONE
         findViewById<TextView>(R.id.tvCreditConsentStatus).visibility =
             if (emailConsentFlow) View.VISIBLE else View.GONE
-        findViewById<MaterialButton>(R.id.btnQuickCreditCheck).isEnabled = true
+        if (!emailConsentFlow) {
+            findViewById<MaterialButton>(R.id.btnQuickCreditCheck).isEnabled = true
+        }
+        restoreSavedCreditConsentState()
 
         when (postScanAction) {
             "share_lead" -> {
@@ -327,19 +336,22 @@ class LicenseResultActivity : AppCompatActivity() {
                 context = this,
                 payload = payload,
                 onSuccess = { resp ->
+                    WorkflowState.setEmailConsentIdForLead(this, leadCorrelationId, resp.consentId)
                     creditConsentId = resp.consentId
                     creditConsentStatus = resp.status
+                    val reusedPending = resp.raw.optBoolean("reusedPendingConsent")
                     runOnUiThread {
                         renderCreditConsentStatus(resp.status)
                         val delivery = resp.raw.optJSONObject("delivery")
                         val dispatch =
                             delivery?.optString("emailDispatch")?.lowercase(Locale.getDefault()).orEmpty()
-                        val toastText = when (dispatch) {
-                            "failed" -> getString(
+                        val toastText = when {
+                            reusedPending -> getString(R.string.credit_consent_already_pending, resp.consentId)
+                            dispatch == "failed" -> getString(
                                 R.string.credit_consent_email_failed,
                                 delivery?.optString("warning").orEmpty().ifBlank { "unknown" }
                             )
-                            "pending", "" -> getString(
+                            dispatch == "pending" || dispatch.isEmpty() -> getString(
                                 R.string.credit_consent_email_dispatching,
                                 resp.consentId
                             )
@@ -375,14 +387,21 @@ class LicenseResultActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             val email = findViewById<EditText>(R.id.etCreditEmail).text?.toString().orEmpty().trim()
+            val resolvedEmailConsentId =
+                if (BuildConfig.ENABLE_EMAIL_CONSENT_FLOW) {
+                    val cid = resolveConsentIdForCreditCheckRun(leadCorrelationId)?.trim().orEmpty()
+                    if (cid.isEmpty()) {
+                        Toast.makeText(this, getString(R.string.credit_consent_id_missing_for_run), Toast.LENGTH_LONG)
+                            .show()
+                        return@setOnClickListener
+                    }
+                    cid
+                } else null
             val payload = JSONObject().apply {
                 put("leadCorrelationId", leadCorrelationId)
-                if (BuildConfig.ENABLE_EMAIL_CONSENT_FLOW) {
-                    val consentId = creditConsentId
-                    if (!consentId.isNullOrBlank()) {
-                        put("consentId", consentId)
-                    }
-                } else {
+                if (BuildConfig.ENABLE_EMAIL_CONSENT_FLOW && resolvedEmailConsentId != null) {
+                    put("consentId", resolvedEmailConsentId)
+                } else if (!BuildConfig.ENABLE_EMAIL_CONSENT_FLOW) {
                     put(
                         "consent",
                         JSONObject().apply {
@@ -481,6 +500,63 @@ class LicenseResultActivity : AppCompatActivity() {
         loadAndPickStock(forceRefresh = false, search = "", openPicker = false)
     }
 
+    override fun onResume() {
+        super.onResume()
+        refreshCreditConsentUiFromConnector()
+    }
+
+    /** In-memory consent id or the one persisted for this scan session’s lead (rotation / process death). */
+    private fun resolveConsentIdForCreditCheckRun(leadCorrelationId: String?): String? {
+        val fromMem = creditConsentId?.trim().orEmpty()
+        if (fromMem.isNotEmpty()) return fromMem
+        val lead = leadCorrelationId?.trim().orEmpty()
+        if (lead.isEmpty()) return null
+        return WorkflowState.getEmailConsentIdForLead(this, lead)?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    /** Customer may approve while we are in Gmail / Chrome; foregrounding must re-fetch connector state. */
+    private fun refreshCreditConsentUiFromConnector() {
+        if (!BuildConfig.ENABLE_EMAIL_CONSENT_FLOW) return
+        val leadId = WorkflowState.getLeadCorrelationId(this)?.trim().orEmpty()
+        val cid = creditConsentId?.trim().takeUnless { it.isNullOrEmpty() }
+            ?: if (leadId.isEmpty()) "" else WorkflowState.getEmailConsentIdForLead(this, leadId)?.trim().orEmpty()
+        if (cid.isEmpty()) return
+        creditConsentId = cid
+        CommandApiService.getConsentStatus(
+            context = this,
+            consentId = cid,
+            onSuccess = { resp ->
+                val sid = resp.consentId.ifBlank { cid }
+                creditConsentId = sid
+                creditConsentStatus = resp.status.lowercase(Locale.getDefault())
+                if (leadId.isNotEmpty()) {
+                    WorkflowState.setEmailConsentIdForLead(this, leadId, sid)
+                }
+                runOnUiThread {
+                    renderCreditConsentStatus(resp.status)
+                }
+                if (resp.status.lowercase(Locale.getDefault()) == "pending") {
+                    watchConsentStatus(sid)
+                }
+            },
+            onError = { err ->
+                // Deployed connector may prune/miss old consent records after restarts.
+                // If a persisted consentId no longer exists, clear local state so user can request a new one.
+                val normalized = err.lowercase(Locale.getDefault())
+                if (normalized.contains("consent_not_found") || normalized.contains("http 404")) {
+                    creditConsentId = null
+                    creditConsentStatus = "none"
+                    if (leadId.isNotEmpty()) {
+                        WorkflowState.clearEmailConsentIdForLead(this, leadId)
+                    }
+                    runOnUiThread {
+                        renderCreditConsentStatus("none")
+                    }
+                }
+            }
+        )
+    }
+
     private fun watchLeadCommandCompletion(correlationId: String) {
         Thread {
             repeat(8) {
@@ -519,14 +595,21 @@ class LicenseResultActivity : AppCompatActivity() {
 
     private fun watchCreditCheckCompletion(correlationId: String) {
         Thread {
-            repeat(10) {
+            var completed = false
+            repeat(CREDIT_CHECK_POLL_MAX_ROUNDS) {
                 try {
                     Thread.sleep(1500)
                     val status = CommandApiService.getCommandStatusBlocking(this, correlationId)
                     val s = status.status.lowercase()
                     if (s == "done") {
                         val cc = status.result?.optJSONObject("creditCheck")
-                        val score = cc?.optInt("score")
+                        val scoreFromCreditCheck = cc?.optInt("score", -1) ?: -1
+                        val scoreFromRoot = status.result?.optInt("score", -1) ?: -1
+                        val score = when {
+                            scoreFromCreditCheck >= 0 -> scoreFromCreditCheck
+                            scoreFromRoot >= 0 -> scoreFromRoot
+                            else -> null
+                        }
                         runOnUiThread {
                             val resultView = findViewById<TextView>(R.id.tvCreditCheckResult)
                             val text = if (score != null && score >= 0) {
@@ -548,6 +631,7 @@ class LicenseResultActivity : AppCompatActivity() {
                             resultView.text = text
                             Toast.makeText(this, text, Toast.LENGTH_LONG).show()
                         }
+                        completed = true
                         return@Thread
                     }
                     if (s == "failed") {
@@ -559,24 +643,73 @@ class LicenseResultActivity : AppCompatActivity() {
                             renderCreditScoreUi(null, null)
                             Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                         }
+                        completed = true
                         return@Thread
                     }
                 } catch (_: Exception) {
                     // keep polling
                 }
             }
+            if (!completed) {
+                runOnUiThread {
+                    Toast.makeText(
+                        this,
+                        "Credit check is still processing. Please wait a little longer and try again.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
         }.start()
     }
 
+    private fun restoreSavedCreditConsentState() {
+        if (!BuildConfig.ENABLE_EMAIL_CONSENT_FLOW) return
+        val leadCorrelationId = WorkflowState.getLeadCorrelationId(this)?.trim().orEmpty()
+        if (leadCorrelationId.isEmpty()) return
+        val saved = WorkflowState.getEmailConsentIdForLead(this, leadCorrelationId)?.trim().orEmpty()
+        if (saved.isEmpty()) return
+        creditConsentId = saved
+        CommandApiService.getConsentStatus(
+            context = this,
+            consentId = saved,
+            onSuccess = { resp ->
+                val sid = resp.consentId.ifBlank { saved }
+                creditConsentId = sid
+                creditConsentStatus = resp.status
+                WorkflowState.setEmailConsentIdForLead(this, leadCorrelationId, sid)
+                runOnUiThread {
+                    renderCreditConsentStatus(resp.status)
+                }
+                watchConsentStatus(sid)
+            },
+            onError = {
+                // Keep saved id; network blips should not wipe state. Poll until GET succeeds.
+                runOnUiThread { renderCreditConsentStatus("pending") }
+                watchConsentStatus(saved)
+            }
+        )
+    }
+
     private fun watchConsentStatus(consentId: String) {
+        synchronized(consentPollLock) {
+            if (consentPollRunning) return
+            consentPollRunning = true
+        }
         Thread {
-            repeat(20) {
-                try {
-                    Thread.sleep(1500)
-                    val isFinal = tryUpdateConsentStatus(consentId)
-                    if (isFinal) return@Thread
-                } catch (_: Exception) {
-                    // keep polling for a short period
+            try {
+                var round = 0
+                while (round < CONSENT_POLL_MAX_ROUNDS) {
+                    try {
+                        Thread.sleep(1500)
+                        if (tryUpdateConsentStatus(consentId)) break
+                    } catch (_: Exception) {
+                        // keep polling
+                    }
+                    round++
+                }
+            } finally {
+                synchronized(consentPollLock) {
+                    consentPollRunning = false
                 }
             }
         }.start()
@@ -621,6 +754,18 @@ class LicenseResultActivity : AppCompatActivity() {
                 latch.countDown()
             },
             onError = {
+                val normalized = it.lowercase(Locale.getDefault())
+                if (normalized.contains("consent_not_found") || normalized.contains("http 404")) {
+                    val leadId = WorkflowState.getLeadCorrelationId(this)?.trim().orEmpty()
+                    creditConsentId = null
+                    creditConsentStatus = "none"
+                    if (leadId.isNotEmpty()) {
+                        WorkflowState.clearEmailConsentIdForLead(this, leadId)
+                    }
+                    runOnUiThread {
+                        renderCreditConsentStatus("none")
+                    }
+                }
                 latch.countDown()
             }
         )
