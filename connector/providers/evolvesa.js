@@ -230,7 +230,9 @@ function createEvolvesaProvider(deps) {
           payload?.message ||
           `Lead created from ${resolvedLeadSource}. Dealer=${tenant?.dealerId || ""} Branch=${tenant?.branchId || ""}${idNumber ? ` ID=${idNumber}` : ""}`,
         "mobile-number": phone,
-        name: firstName || fullName,
+        name: fullName || firstName || "Customer",
+        ...(firstName ? { "first-name": firstName } : {}),
+        ...(lastName ? { "last-name": lastName } : {}),
         ...(lastName ? { surname: lastName } : {}),
         ...(fullName ? { "full-name": fullName } : {}),
         ...(createdByUserId ? { "assigned-to-user-id": String(createdByUserId) } : {}),
