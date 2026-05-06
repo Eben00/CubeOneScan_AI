@@ -2335,6 +2335,12 @@ function stockMatchesDealerScope(row, dealerScope) {
   return false;
 }
 
+function hasDealerIdentifiers(row) {
+  const rawDealer = normalizeDealerToken(row?.dealerId);
+  const rawDigits = normalizeDealerDigits(row?.dealerId);
+  return Boolean(rawDealer || rawDigits);
+}
+
 function normalizeVehicleToken(value) {
   return String(value || "").trim().toLowerCase();
 }
@@ -4003,8 +4009,10 @@ app.get("/api/v1/stocks", requireAuth, extractTenantContext, async (req, res) =>
     }
     let rows = fetched.rows.slice();
 
-    // VMG feeds are dedicated per dealer URL; AutoTrader needs explicit dealer filtering.
-    if (!useVmgFeed) {
+    // Always enforce dealer filtering when row-level dealer identifiers exist.
+    // Some VMG feeds can include mixed dealer stock; do not rely purely on feed URL scoping.
+    const rowHasDealerIds = rows.some((r) => hasDealerIdentifiers(r));
+    if (!useVmgFeed || rowHasDealerIds) {
       rows = rows.filter((r) => stockMatchesDealerScope(r, dealerScope));
     }
     if (branchScope && !isStockTakeMode) {
@@ -4084,7 +4092,8 @@ app.get("/api/v1/stocks", requireAuth, extractTenantContext, async (req, res) =>
           warning: "Missing dealer scope; stock list withheld for business isolation.",
         });
       }
-      if (!useVmgFeed) {
+      const rowHasDealerIds = rows.some((r) => hasDealerIdentifiers(r));
+      if (!useVmgFeed || rowHasDealerIds) {
         rows = rows.filter((r) => stockMatchesDealerScope(r, dealerScope));
       }
       if (branchScope && !isStockTakeMode) {
