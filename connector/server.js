@@ -3605,6 +3605,10 @@ app.get("/", (req, res) => {
   });
 });
 
+app.get("/pilot/evolvesa", (req, res) => {
+  return res.redirect(302, "/pilot/evolvesa/app-evolvesa-release.apk");
+});
+
 app.get("/healthz", (req, res) => {
   res.json({ ok: true });
 });
