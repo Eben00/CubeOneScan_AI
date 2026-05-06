@@ -5186,6 +5186,44 @@ consentApproveRouter.post("/", (req, res) => {
       ip: req.ip || null,
       userAgent: req.headers["user-agent"] || null,
     });
+    if (decision === "approve") {
+      // Operational resilience: if duplicate pending consents exist for the same lead/purpose,
+      // finalize them as approved too so app polling by a sibling consentId does not remain "pending".
+      const targetLeadCorrelationId = String(record.leadCorrelationId || "").trim();
+      const targetLeadId = String(record.leadId || "").trim();
+      const targetPurpose = String(record.purpose || "").trim().toLowerCase();
+      const targetDealerId = String(record.tenantContext?.dealerId || "").trim();
+      for (const [otherId, other] of consentRecords.entries()) {
+        if (otherId === consentId) continue;
+        if (String(other?.status || "").toLowerCase() !== "pending") continue;
+        if (String(other?.purpose || "").trim().toLowerCase() !== targetPurpose) continue;
+        if (String(other?.tenantContext?.dealerId || "").trim() !== targetDealerId) continue;
+        const sameLeadCorrelationId =
+          targetLeadCorrelationId &&
+          String(other?.leadCorrelationId || "").trim() &&
+          String(other?.leadCorrelationId || "").trim() === targetLeadCorrelationId;
+        const sameLeadId =
+          targetLeadId &&
+          String(other?.leadId || "").trim() &&
+          String(other?.leadId || "").trim() === targetLeadId;
+        if (!sameLeadCorrelationId && !sameLeadId) continue;
+        other.status = "approved";
+        other.approvedAt = nowIso;
+        other.updatedAt = nowIso;
+        other.approvalMeta = {
+          ip: req.ip || null,
+          userAgent: req.headers["user-agent"] || null,
+          approvedFromPublicLink: true,
+          approvedViaEquivalentConsent: consentId,
+        };
+        consentRecords.set(otherId, other);
+        appendConsentEvent(otherId, "approved_equivalent", {
+          sourceConsentId: consentId,
+          ip: req.ip || null,
+          userAgent: req.headers["user-agent"] || null,
+        });
+      }
+    }
     persistStore();
     if (decision === "approve") {
       // Best-effort follow-up; do not block approval response on email delivery.
