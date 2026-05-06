@@ -11,12 +11,18 @@
     "drivex.ops@cubeonescan.local": "510",
     "drivex.ops2@cubeonescan.local": "510",
     "drive.admin@cubeone.local": "510",
-    "integra.admin@cubeonescan.local": "501"
+    "integra.admin@cubeonescan.local": "501",
+    "integra.ops@cubeonescan.local": "501",
+    "integra.manager@cubeonescan.local": "501",
+    "integra.principal@cubeonescan.local": "501"
   },
   "vmgDealerScopes": [
     "1257",
     "501"
   ],
+  "vmgStockFeedUrlByDealer": {
+    "501": "http://feeds.vmgsoftware.co.za/xml/f25/feed_501.xml"
+  },
   "evolvesaLeadReceivingEntityMap": {
     "1257": "509|LDC Auto",
     "510": "510|DriveXperiance",

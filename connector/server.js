@@ -181,9 +181,18 @@ const BREVO_API_KEY = (process.env.BREVO_API_KEY || "").trim();
 const CONSENT_FROM_EMAIL_BY_DEALER_RAW = (process.env.CONSENT_FROM_EMAIL_BY_DEALER || "").trim();
 const CONSENT_APPROVAL_FOLLOWUP_EMAIL_ENABLED =
   String(process.env.CONSENT_APPROVAL_FOLLOWUP_EMAIL_ENABLED || "0").trim() === "1";
-const CONSENT_POPIA_PRIVACY_URL = (process.env.CONSENT_POPIA_PRIVACY_URL || "").trim();
-const CONSENT_POPIA_NOTICE_URL = (process.env.CONSENT_POPIA_NOTICE_URL || "").trim();
-const CONSENT_POPIA_TERMS_URL = (process.env.CONSENT_POPIA_TERMS_URL || "").trim();
+const CONSENT_POPIA_PRIVACY_URL = (
+  process.env.CONSENT_POPIA_PRIVACY_URL ||
+  "https://inforegulator.org.za/wp-content/uploads/2020/07/InfoRegSA-eForm-PriorAuthorisation-20210311.pdf"
+).trim();
+const CONSENT_POPIA_NOTICE_URL = (
+  process.env.CONSENT_POPIA_NOTICE_URL ||
+  "https://inforegulator.org.za/wp-content/uploads/2020/07/FORM-4-APPLICATION-FOR-THE-CONSENT-OF-A-DATA-SUBJECT-FOR-THE-PROCESSING-OF.pdf"
+).trim();
+const CONSENT_POPIA_TERMS_URL = (
+  process.env.CONSENT_POPIA_TERMS_URL ||
+  "https://inforegulator.org.za/wp-content/uploads/2020/07/FORM-3-APPLICATION-FOR-THE-ISSUE-OF-A-CODE-OF-CONDUCT.pdf"
+).trim();
 const COMMAND_MAX_RETRIES = Number(process.env.COMMAND_MAX_RETRIES || 3);
 const COMMAND_RETRY_DELAY_MS = Number(process.env.COMMAND_RETRY_DELAY_MS || 1200);
 const CREDIT_CHECK_MODE = String(process.env.CREDIT_CHECK_MODE || "stub").trim().toLowerCase();
