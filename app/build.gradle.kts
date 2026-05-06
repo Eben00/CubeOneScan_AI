@@ -44,7 +44,8 @@ android {
         buildConfigField("String", "LOCKED_CONNECTOR_BASE_URL", "\"\"")
         buildConfigField("String", "LOCKED_AUTH_BASE_URL", "\"\"")
         buildConfigField("String", "LOCKED_CONNECTOR_API_KEY", "\"\"")
-        buildConfigField("Boolean", "ENABLE_EMAIL_CONSENT_FLOW", "false")
+        // POPIA / EvolveSA: CREDIT_CHECK must send payload.consentId after email approval (cubeone & evolvesa).
+        buildConfigField("Boolean", "ENABLE_EMAIL_CONSENT_FLOW", "true")
     }
 
     flavorDimensions += "brand"
@@ -58,8 +59,6 @@ android {
             applicationIdSuffix = ".evolvesa"
             versionNameSuffix = "-evolvesa"
             resValue("string", "app_name", "EvolveSA")
-            // POPIA: send approval link to lead email (connector /api/v1/consents + Brevo SMTP).
-            buildConfigField("Boolean", "ENABLE_EMAIL_CONSENT_FLOW", "true")
         }
     }
 
@@ -102,6 +101,16 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+    }
+
+    // Smaller APKs per CPU architecture for faster pilot installs.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = true
         }
     }
 

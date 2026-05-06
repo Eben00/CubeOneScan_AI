@@ -3617,6 +3617,20 @@ app.get("/", (req, res) => {
 });
 
 app.get("/pilot/evolvesa", (req, res) => {
+  const baseDir = path.join(STATIC_PUBLIC_DIR, "pilot", "evolvesa");
+  // Prefer arm64 build for most modern Android devices; fallback to other common names.
+  const preferred = [
+    "app-evolvesa-arm64-v8a-release.apk",
+    "app-arm64-v8a-evolvesa-release.apk",
+    "app-evolvesa-release-arm64-v8a.apk",
+    "app-evolvesa-release.apk",
+  ];
+  for (const file of preferred) {
+    const candidate = path.join(baseDir, file);
+    if (fs.existsSync(candidate)) {
+      return res.redirect(302, `/pilot/evolvesa/${file}`);
+    }
+  }
   return res.redirect(302, "/pilot/evolvesa/app-evolvesa-release.apk");
 });
 
@@ -3627,7 +3641,7 @@ app.get("/pilot/evolvesa/app-evolvesa-release.apk", (req, res) => {
 <html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>APK Not Uploaded</title></head><body style="font-family: Arial, sans-serif; padding: 24px;">
 <h2>EvolveSA APK not uploaded yet</h2>
-<p>Upload <code>app-evolvesa-release.apk</code> to <code>connector/public/pilot/evolvesa/</code> and redeploy the connector.</p>
+<p>Upload a release APK to <code>connector/public/pilot/evolvesa/</code> and redeploy the connector. Preferred filename: <code>app-evolvesa-arm64-v8a-release.apk</code> (fallback: <code>app-evolvesa-release.apk</code>).</p>
 </body></html>`);
   }
   return res.sendFile(apkPath);
