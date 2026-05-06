@@ -145,7 +145,11 @@ function createEvolvesaProvider(deps) {
   function resolveLeadTriggerUrl(tenantDealerId) {
     const dealerId = canonicalDealerId(tenantDealerId);
     if (dealerId && maps.leadTriggerUrlByDealer.has(dealerId)) {
-      return maps.leadTriggerUrlByDealer.get(dealerId);
+      const mappedUrl = String(maps.leadTriggerUrlByDealer.get(dealerId) || "").trim();
+      // Guardrail: ignore placeholder configs and fallback to global trigger URL with did substitution.
+      if (mappedUrl && !mappedUrl.includes("<trigger-id>")) {
+        return mappedUrl;
+      }
     }
     if (!leadTriggerUrl) return "";
     try {
@@ -182,6 +186,9 @@ function createEvolvesaProvider(deps) {
     const createdByUserId = tenant?.userId || "";
     const createdByRole = tenant?.role || "";
     const assignedTo = createdByEmail || createdByName || createdByUserId;
+    const resolvedLeadSource =
+      String(payload?.leadSource || payload?.source || leadSource || "").trim() || "CubeOneScan";
+    const resolvedLeadSourceId = String(payload?.leadSourceId || payload?.sourceId || leadSourceId || "").trim();
     const leadReference = dl?.idNumber || dl?.LICENSE_NUMBER || dl?.licenseNumber || `lead_${uuidv4()}`;
     const created = formatEvolvesaLocalDateTime(new Date());
 
@@ -189,8 +196,8 @@ function createEvolvesaProvider(deps) {
       "ancillary-data": {
         area: ancillaryArea,
         type: "stock",
-        source: leadSource,
-        ...(leadSourceId ? { "source-id": leadSourceId } : {}),
+        source: resolvedLeadSource,
+        ...(resolvedLeadSourceId ? { "source-id": resolvedLeadSourceId } : {}),
         ...(idNumber ? { "id-number": String(idNumber) } : {}),
         ...(createdByUserId ? { "created-by-user-id": String(createdByUserId) } : {}),
         ...(createdByName ? { "created-by-name": String(createdByName) } : {}),
@@ -203,8 +210,12 @@ function createEvolvesaProvider(deps) {
       },
       created,
       "lead-reference": String(leadReference),
-      ...(leadSource ? { "lead-source": leadSource } : {}),
-      ...(leadSourceId ? { "lead-source-id": leadSourceId } : {}),
+      ...(resolvedLeadSource ? { "lead-source": resolvedLeadSource } : {}),
+      ...(resolvedLeadSourceId ? { "lead-source-id": resolvedLeadSourceId } : {}),
+      ...(assignedTo ? { "assigned-to": String(assignedTo) } : {}),
+      ...(createdByEmail ? { "assigned-to-email": String(createdByEmail) } : {}),
+      ...(createdByName ? { "assigned-to-name": String(createdByName) } : {}),
+      ...(createdByUserId ? { "assigned-to-user-id": String(createdByUserId) } : {}),
       "receiving-entity": {
         id: receivingEntity.id,
         name: receivingEntity.name,
@@ -212,12 +223,12 @@ function createEvolvesaProvider(deps) {
       "user-data": {
         area: userArea,
         email,
-        ...(leadSource ? { source: leadSource } : {}),
-        ...(leadSourceId ? { "source-id": leadSourceId } : {}),
+        ...(resolvedLeadSource ? { source: resolvedLeadSource } : {}),
+        ...(resolvedLeadSourceId ? { "source-id": resolvedLeadSourceId } : {}),
         message:
           dl?.message ||
           payload?.message ||
-          `Lead created from ${leadSource}. Dealer=${tenant?.dealerId || ""} Branch=${tenant?.branchId || ""}${idNumber ? ` ID=${idNumber}` : ""}`,
+          `Lead created from ${resolvedLeadSource}. Dealer=${tenant?.dealerId || ""} Branch=${tenant?.branchId || ""}${idNumber ? ` ID=${idNumber}` : ""}`,
         "mobile-number": phone,
         name: firstName || fullName,
         ...(lastName ? { surname: lastName } : {}),

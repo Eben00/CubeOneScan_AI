@@ -1250,7 +1250,7 @@ function parseDealerEntityLabel(value) {
 }
 
 function resolveDealerDisplayName(tenantContext = {}) {
-  const dealerId = String(tenantContext?.dealerId || "").trim();
+  const dealerId = canonicalDealerId(tenantContext?.dealerId);
   if (dealerId && EVOLVESA_LEAD_RECEIVING_ENTITY_MAP.has(dealerId)) {
     const label = parseDealerEntityLabel(EVOLVESA_LEAD_RECEIVING_ENTITY_MAP.get(dealerId));
     if (label) return label;
@@ -1295,14 +1295,14 @@ function getConsentMailer() {
 }
 
 function resolveConsentFromAddress(tenantContext = {}, dealerDisplayName = "Dealership") {
-  const dealerId = String(tenantContext?.dealerId || "").trim();
+  const dealerId = canonicalDealerId(tenantContext?.dealerId);
   const mappedFrom = dealerId ? String(CONSENT_FROM_EMAIL_BY_DEALER.get(dealerId) || "").trim() : "";
   const fromEmail = mappedFrom || SMTP_FROM_EMAIL || SMTP_USER;
   return `"${dealerDisplayName}" <${fromEmail}>`;
 }
 
 function resolveConsentSenderParts(tenantContext = {}, dealerDisplayName = "Dealership") {
-  const dealerId = String(tenantContext?.dealerId || "").trim();
+  const dealerId = canonicalDealerId(tenantContext?.dealerId);
   const mappedFrom = dealerId ? String(CONSENT_FROM_EMAIL_BY_DEALER.get(dealerId) || "").trim() : "";
   const fromEmail = (mappedFrom || SMTP_FROM_EMAIL || SMTP_USER || "").trim();
   return { name: dealerDisplayName, email: fromEmail };
@@ -3628,10 +3628,15 @@ app.get("/pilot/evolvesa", (req, res) => {
   for (const file of preferred) {
     const candidate = path.join(baseDir, file);
     if (fs.existsSync(candidate)) {
-      return res.redirect(302, `/pilot/evolvesa/${file}`);
+      return res.sendFile(candidate);
     }
   }
-  return res.redirect(302, "/pilot/evolvesa/app-evolvesa-release.apk");
+  return res.status(404).type("html").send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>APK Not Uploaded</title></head><body style="font-family: Arial, sans-serif; padding: 24px;">
+<h2>EvolveSA APK not uploaded yet</h2>
+<p>Upload a release APK to <code>connector/public/pilot/evolvesa/</code> and redeploy the connector.</p>
+</body></html>`);
 });
 
 app.get("/pilot/evolvesa/app-evolvesa-release.apk", (req, res) => {
