@@ -16,6 +16,8 @@ try {
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: false }));
+const STATIC_PUBLIC_DIR = path.join(__dirname, "public");
+app.use(express.static(STATIC_PUBLIC_DIR));
 
 function normalizeConfigToken(input) {
   let v = String(input || "").trim();
@@ -3607,6 +3609,19 @@ app.get("/", (req, res) => {
 
 app.get("/pilot/evolvesa", (req, res) => {
   return res.redirect(302, "/pilot/evolvesa/app-evolvesa-release.apk");
+});
+
+app.get("/pilot/evolvesa/app-evolvesa-release.apk", (req, res) => {
+  const apkPath = path.join(STATIC_PUBLIC_DIR, "pilot", "evolvesa", "app-evolvesa-release.apk");
+  if (!fs.existsSync(apkPath)) {
+    return res.status(404).type("html").send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>APK Not Uploaded</title></head><body style="font-family: Arial, sans-serif; padding: 24px;">
+<h2>EvolveSA APK not uploaded yet</h2>
+<p>Upload <code>app-evolvesa-release.apk</code> to <code>connector/public/pilot/evolvesa/</code> and redeploy the connector.</p>
+</body></html>`);
+  }
+  return res.sendFile(apkPath);
 });
 
 app.get("/healthz", (req, res) => {
