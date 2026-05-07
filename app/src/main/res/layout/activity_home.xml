@@ -127,6 +127,16 @@
                     android:minHeight="52dp"
                     android:text="@string/home_ops_dashboard"
                     app:cornerRadius="@dimen/corner_button" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDealDocuments"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:minHeight="52dp"
+                    android:text="@string/home_deal_documents"
+                    app:cornerRadius="@dimen/corner_button" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

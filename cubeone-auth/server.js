@@ -288,7 +288,8 @@ function normalizeRole(input) {
   if (!raw) return "sales_person";
   if (BUSINESS_ROLES.includes(raw)) return raw;
   // Backward compatibility mapping for older roles.
-  if (["superadmin", "owner", "admin"].includes(raw)) return "dealer_principal";
+  if (["superadmin", "owner", "admin", "tenant_admin_editor", "tenant_admin_approver"].includes(raw)) return "dealer_principal";
+  if (["manager", "sales-manager", "sales manager"].includes(raw)) return "sales_manager";
   if (raw === "agent") return "sales_person";
   return "sales_person";
 }
@@ -444,6 +445,32 @@ function applyTenantConfigPayload(payload, sourceLabel = "admin_api") {
   ).trim();
   AUTH_DEALER_ID_ALIASES = parseMap(AUTH_DEALER_ID_ALIASES_RAW);
   AUTH_EMAIL_DEALER_MAP = parseMap(AUTH_EMAIL_DEALER_MAP_RAW);
+}
+
+function upsertEmailDealerMapping(email, dealerId, sourceLabel = "auth_auto_map") {
+  const normalizedEmail = normalizeEmail(email);
+  const canonicalDealer = canonicalDealerId(dealerId);
+  if (!normalizedEmail || !canonicalDealer) return false;
+  const current = canonicalDealerId(AUTH_EMAIL_DEALER_MAP.get(normalizedEmail) || "");
+  if (current === canonicalDealer) return false;
+
+  const snapshot = tenantConfigSnapshot();
+  const nextPayload = {
+    dealerAliases: snapshot.dealerAliases || {},
+    emailDealerMap: {
+      ...(snapshot.emailDealerMap || {}),
+      [normalizedEmail]: canonicalDealer,
+    },
+  };
+  applyTenantConfigPayload(nextPayload, sourceLabel);
+  try {
+    fs.mkdirSync(AUTH_DATA_DIR, { recursive: true });
+    fs.writeFileSync(TENANT_CONFIG_RUNTIME_FILE, JSON.stringify(nextPayload, null, 2), "utf8");
+    appendTenantConfigHistory("auto_email_dealer_map_upsert", nextPayload, null);
+  } catch (_) {
+    // Mapping is still applied in-memory for the current process.
+  }
+  return true;
 }
 
 function canonicalDealerId(input) {
@@ -776,6 +803,7 @@ app.post("/api/v1/auth/register", async (req, res) => {
     mustChangePassword: false,
     sessionVersion: 1,
   });
+  upsertEmailDealerMapping(email, resolveUserDealerId(email, dealerId), "auth_register_auto_map");
   writeUsers(users);
 
   appendAudit({
@@ -981,6 +1009,7 @@ app.post("/api/v1/admin/users", requireAdmin, async (req, res) => {
     mustChangePassword: true,
     sessionVersion: 1,
   };
+  upsertEmailDealerMapping(newUser.email, newUser.dealerId, "admin_user_create_auto_map");
   users.push(newUser);
   writeUsers(users);
 

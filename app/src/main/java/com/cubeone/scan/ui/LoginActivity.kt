@@ -12,6 +12,7 @@ import com.cubeone.scan.core.auth.AuthApiService
 import com.cubeone.scan.core.auth.AuthResult
 import com.cubeone.scan.core.auth.RegisterResult
 import com.cubeone.scan.core.auth.AuthStore
+import com.cubeone.scan.utils.AppAnalytics
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.progressindicator.CircularProgressIndicator
 import com.google.android.material.textfield.TextInputEditText
@@ -74,9 +75,11 @@ class LoginActivity : AppCompatActivity() {
                                 mustChangePassword = result.mustChangePassword
                             )
                             if (result.mustChangePassword) {
+                                AppAnalytics.logAppOpen(this)
                                 startActivity(Intent(this, ChangePasswordActivity::class.java))
                                 finish()
                             } else {
+                                AppAnalytics.logAppOpen(this)
                                 navigateToHome()
                             }
                         }

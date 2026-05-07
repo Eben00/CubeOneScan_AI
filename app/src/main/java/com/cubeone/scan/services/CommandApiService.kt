@@ -207,6 +207,17 @@ object CommandApiService {
             return "Feature not available on this connector yet. Please deploy latest backend."
         }
         if (text.contains("HTTP 401")) return "Authentication failed. Check API key and sign in again."
+        if (text.contains("HTTP 400")) {
+            val detail = text.substringAfter("\n\n", "").trim().ifBlank { text.substringAfter("HTTP 400:", "").trim() }
+            if (detail.contains("CREDIT_CHECK", ignoreCase = true) || detail.contains("consentId", ignoreCase = true)) {
+                return if (detail.isNotBlank()) {
+                    "Credit check not accepted: $detail"
+                } else {
+                    "Credit check rejected (HTTP 400). Confirm consent is approved on the connector, then retry."
+                }
+            }
+            return if (detail.isNotBlank()) "Request rejected (HTTP 400): $detail" else text
+        }
         if (text.contains("HTTP 403")) {
             val hint = text.substringAfter("\n\n").trim().lineSequence().firstOrNull()?.trim().orEmpty()
             return if (hint.isNotBlank()) {
@@ -602,6 +613,26 @@ object CommandApiService {
         onSuccess: (JSONObject) -> Unit,
         onError: (String) -> Unit
     ) = getJson(context, "/api/v1/test-drives/active", onSuccess, onError)
+
+    fun postScanRecord(
+        context: Context,
+        payload: JSONObject,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) = postJson(context, "/api/v1/scan/records", payload, onSuccess, onError)
+
+    fun postScanStockTake(
+        context: Context,
+        payload: JSONObject,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) = postJson(context, "/api/v1/scan/stock-take", payload, onSuccess, onError)
+
+    fun getScanOperationsDashboard(
+        context: Context,
+        onSuccess: (JSONObject) -> Unit,
+        onError: (String) -> Unit
+    ) = getJson(context, "/api/v1/scan/operations-dashboard", onSuccess, onError)
 
     fun flushQueuedCommands(
         context: Context,

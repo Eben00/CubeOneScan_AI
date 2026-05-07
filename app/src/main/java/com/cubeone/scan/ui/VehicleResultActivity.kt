@@ -54,7 +54,8 @@ class VehicleResultActivity : AppCompatActivity() {
         val role = rawRole.trim().lowercase()
         return when (role) {
             "dealer_principal", "sales_manager", "sales_person" -> role
-            "superadmin", "owner", "admin" -> "dealer_principal"
+            "superadmin", "owner", "admin", "tenant_admin_editor", "tenant_admin_approver" -> "dealer_principal"
+            "manager", "sales-manager", "sales manager" -> "sales_manager"
             "agent" -> "sales_person"
             else -> "sales_person"
         }

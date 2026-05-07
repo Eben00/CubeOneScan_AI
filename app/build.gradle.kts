@@ -173,6 +173,7 @@ dependencies {
     // Firebase Crashlytics (keep versions compatible with Kotlin 1.9.x toolchain)
     implementation(platform("com.google.firebase:firebase-bom:33.6.0"))
     implementation("com.google.firebase:firebase-crashlytics-ktx")
+    implementation("com.google.firebase:firebase-analytics-ktx")
 
     // Security
     implementation("org.bouncycastle:bcprov-jdk15on:1.70")

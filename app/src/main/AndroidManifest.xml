@@ -104,6 +104,11 @@
             android:theme="@style/Theme.CubeOneScan" />
 
         <activity
+            android:name=".ui.DealDocumentsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.CubeOneScan" />
+
+        <activity
             android:name=".ui.TestDriveActivity"
             android:exported="false"
             android:theme="@style/Theme.CubeOneScan" />

@@ -20,6 +20,7 @@
     <string name="home_test_drive_safety">Test drive safety</string>
     <string name="home_manager_approvals">Manager approvals</string>
     <string name="home_audit_events">Audit events</string>
+    <string name="home_deal_documents">Scan / upload deal documents</string>
     <string name="home_logout_all_devices">Log out all devices</string>
     <string name="home_offline_queue_placeholder">Offline queue: 0 pending</string>
     <string name="home_command_health_placeholder">Sync health: ready</string>
@@ -85,6 +86,8 @@
     <string name="credit_consent_email_dispatching">Consent saved. Approval email is sending from the server — check inbox and spam. Ref: %1$s</string>
     <string name="credit_consent_email_failed">Approval email was not delivered: %1$s</string>
     <string name="credit_consent_email_delivered_hint">Server reports the approval email was sent. Check inbox and spam.</string>
+    <string name="credit_consent_already_pending">A pending request already exists for this lead. Showing status. Ref: %1$s</string>
+    <string name="credit_consent_id_missing_for_run">Send the approval link first so this lead has a consent reference.</string>
     <string name="run_quick_credit_check">Run quick score</string>
     <string name="credit_result_placeholder">Quick score not run yet</string>
     <string name="credit_score_result_format">Quick score: %1$d</string>
@@ -101,6 +104,17 @@
     <string name="communication_note_hint">Comment / update for lead timeline</string>
     <string name="communication_log_button">Log note to CRM timeline</string>
     <string name="communication_last_placeholder">No communication logged yet.</string>
+    <string name="deal_docs_title">Sales deal file documents</string>
+    <string name="deal_docs_subtitle">Select a photo or PDF for each required item. The app posts directly to scan records and falls back to offline queue if needed.</string>
+    <string name="deal_docs_deal_ref_hint">Deal reference (required for DMS trace)</string>
+    <string name="deal_docs_customer_ref_hint">Customer reference (optional)</string>
+    <string name="deal_docs_upload">Upload</string>
+    <string name="deal_docs_status_pending">Status: pending upload</string>
+    <string name="deal_docs_status_uploading">Status: uploading...</string>
+    <string name="deal_docs_status_uploaded">Status: uploaded %1$s (ref %2$s)</string>
+    <string name="deal_docs_status_queued">Status: queued offline, will retry</string>
+    <string name="deal_docs_status_failed">Status: failed - %1$s</string>
+    <string name="deal_docs_deal_ref_required">Enter Deal Reference before uploading documents.</string>
     <string name="ops_targets_title">Ops KPI targets and forecast</string>
     <string name="ops_dashboard_title">Operations dashboard</string>
     <string name="ops_dashboard_subtitle">Track targets, monthly forecast, and dealer-level performance from one view.</string>

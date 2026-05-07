@@ -27,6 +27,7 @@ import com.cubeone.scan.BuildConfig
 import com.cubeone.scan.core.auth.AuthStore
 import com.cubeone.scan.R
 import com.cubeone.scan.services.CommandApiService
+import com.cubeone.scan.utils.AppAnalytics
 import com.cubeone.scan.utils.WorkflowState
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
@@ -56,6 +57,8 @@ class LicenseResultActivity : AppCompatActivity() {
     private var consentPollRunning = false
     private var consentEmailFailureToastShownFor: String? = null
     private var consentEmailSentToastShownFor: String? = null
+    private var consentApprovedTrackedFor: String? = null
+    private var lastTrackedCreditScoreKey: String? = null
     private var senderDisplayName: String = ""
     private var senderDealershipName: String = ""
     private val thumbnailCache: LruCache<String, Bitmap> by lazy {
@@ -332,6 +335,7 @@ class LicenseResultActivity : AppCompatActivity() {
                     }
                 )
             }
+            AppAnalytics.logConsentSendTapped(this, leadCorrelationId)
             CommandApiService.createConsent(
                 context = this,
                 payload = payload,
@@ -725,6 +729,13 @@ class LicenseResultActivity : AppCompatActivity() {
                 val status = resp.status.lowercase(Locale.getDefault())
                 creditConsentId = resp.consentId.ifBlank { consentId }
                 creditConsentStatus = status
+                if (status == "approved" && consentApprovedTrackedFor != consentId) {
+                    val leadCorrelationId = WorkflowState.getLeadCorrelationId(this)?.trim().orEmpty()
+                    if (leadCorrelationId.isNotEmpty()) {
+                        AppAnalytics.logConsentStatusApproved(this, leadCorrelationId, consentId)
+                        consentApprovedTrackedFor = consentId
+                    }
+                }
                 val delivery = resp.raw.optJSONObject("delivery")
                 val dispatch =
                     delivery?.optString("emailDispatch")?.lowercase(Locale.getDefault()).orEmpty()
@@ -841,6 +852,14 @@ class LicenseResultActivity : AppCompatActivity() {
         }
 
         val normalized = score.coerceIn(0, 999)
+        val leadCorrelationId = WorkflowState.getLeadCorrelationId(this)?.trim().orEmpty()
+        if (leadCorrelationId.isNotEmpty()) {
+            val trackingKey = "$leadCorrelationId:$normalized"
+            if (lastTrackedCreditScoreKey != trackingKey) {
+                AppAnalytics.logCreditScoreRendered(this, leadCorrelationId, normalized, band.label)
+                lastTrackedCreditScoreKey = trackingKey
+            }
+        }
         ring.setProgressCompat(normalized, true)
         val color = ContextCompat.getColor(this, band.colorResId)
         ring.setIndicatorColor(color)
